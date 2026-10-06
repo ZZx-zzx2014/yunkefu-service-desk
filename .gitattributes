@@ -1,0 +1,31 @@
+# 统一换行符，避免 Windows 提交把整个仓库变成 CRLF
+# 仓库内一律使用 LF；检出时由 Git 在本地按平台转换（如需可自行调整 eol）
+
+* text=auto eol=lf
+
+# 明确二进制文件，避免被当作文本处理而损坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary
+*.db binary
+
+# 各类型文件的差异展示与语言识别
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.ps1  text eol=crlf
+
+# 锁文件不参与语言统计（避免影响仓库语言构成）
+package-lock.json linguist-generated=true -diff

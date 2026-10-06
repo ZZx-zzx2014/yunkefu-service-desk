@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>管理后台 - 云客客服系统</title>
+<link rel="stylesheet" href="/assets/base.css">
+<style>
+  .page-grid { display: grid; gap: 18px; }
+  .kpi-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
+  .kpi {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; position: relative;
+  }
+  .kpi__label { font-size: 12px; color: var(--text-3); margin-bottom: 5px; }
+  .kpi__value { font-size: 23px; font-weight: 700; letter-spacing: -.5px; line-height: 1.15; }
+  .kpi__delta { font-size: 11.5px; margin-top: 5px; display: flex; align-items: center; gap: 4px; }
+  .kpi__spark { position: absolute; right: 12px; top: 12px; font-size: 17px; opacity: .8; }
+
+  .dept-card {
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 16px;
+    transition: box-shadow .16s; background: var(--surface);
+  }
+  .dept-card:hover { box-shadow: var(--shadow-sm); }
+
+  .setting-item {
+    display: flex; align-items: flex-start; gap: 16px; padding: 15px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .setting-item:last-child { border-bottom: none; }
+  .setting-item__main { flex: 1; min-width: 0; }
+  .setting-item__label { font-size: 13.5px; font-weight: 500; margin-bottom: 4px; }
+  .setting-item__desc { font-size: 12px; color: var(--text-3); }
+  .setting-item__control { width: 300px; flex-shrink: 0; }
+  @media (max-width: 760px) { .setting-item { flex-direction: column; } .setting-item__control { width: 100%; } }
+
+  .log-item { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .log-item:last-child { border-bottom: none; }
+  .log-item__icon {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--brand-soft); flex-shrink: 0; font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- ==================== 侧边栏 ==================== -->
+  <aside class="sidebar">
+    <div class="sidebar__brand">
+      <div class="sidebar__logo">⚙️</div>
+      <div>
+        <div class="sidebar__title" id="siteName">管理后台</div>
+        <div class="sidebar__sub">YunKe Admin Console</div>
+      </div>
+    </div>
+    <nav class="sidebar__nav">
+      <div class="sidebar__group">数据</div>
+      <a class="nav-item" data-route="/dashboard" href="#/dashboard"><span class="nav-item__icon">📊</span><span>数据看板</span></a>
+      <a class="nav-item" data-route="/reports" href="#/reports"><span class="nav-item__icon">📈</span><span>统计分析</span></a>
+      <div class="sidebar__group">服务管理</div>
+      <a class="nav-item" data-route="/conversations" href="#/conversations"><span class="nav-item__icon">💬</span><span>会话记录</span></a>
+      <a class="nav-item" data-route="/tickets" href="#/tickets"><span class="nav-item__icon">🎫</span><span>工单中心</span>
+        <span class="nav-item__badge hidden" id="badgePendingTicket">0</span></a>
+      <a class="nav-item" data-route="/kb" href="#/kb"><span class="nav-item__icon">📚</span><span>知识库</span></a>
+      <a class="nav-item" data-route="/quick" href="#/quick"><span class="nav-item__icon">⚡</span><span>快捷话术</span></a>
+      <div class="sidebar__group">组织与系统</div>
+      <a class="nav-item" data-route="/agents" href="#/agents"><span class="nav-item__icon">👤</span><span>坐席管理</span></a>
+      <a class="nav-item" data-route="/customers" href="#/customers"><span class="nav-item__icon">👥</span><span>客户管理</span></a>
+      <a class="nav-item" data-route="/departments" href="#/departments"><span class="nav-item__icon">🏢</span><span>部门管理</span></a>
+      <a class="nav-item" data-route="/settings" href="#/settings"><span class="nav-item__icon">🔧</span><span>系统设置</span></a>
+      <a class="nav-item" data-route="/logs" href="#/logs"><span class="nav-item__icon">📝</span><span>操作日志</span></a>
+    </nav>
+    <div class="sidebar__foot">
+      <div class="flex items-center gap-10 mb-8">
+        <div id="meAvatar"></div>
+        <div class="flex-1" style="min-width:0">
+          <div style="color:#fff;font-size:13px;font-weight:500" class="ellipsis" id="meName">-</div>
+          <div style="font-size:11px;color:#64748b">超级管理员</div>
+        </div>
+      </div>
+      <button class="btn btn--sm btn--block" style="background:rgba(255,255,255,.08);border-color:transparent;color:#cbd5e1" id="btnLogout">退出登录</button>
+    </div>
+  </aside>
+
+  <!-- ==================== 主区域 ==================== -->
+  <div class="main-area">
+    <header class="topbar">
+      <div>
+        <div class="topbar__title" id="pageTitle">数据看板</div>
+        <div class="topbar__desc" id="pageDesc">全局服务数据概览</div>
+      </div>
+      <div class="topbar__right">
+        <select class="select" id="rangeSelect" style="width:120px;height:32px">
+          <option value="1d">今日</option>
+          <option value="7d" selected>近 7 天</option>
+          <option value="30d">近 30 天</option>
+          <option value="90d">近 90 天</option>
+        </select>
+        <button class="btn btn--sm" id="btnBroadcast">📢 发通知</button>
+        <button class="btn btn--sm btn--icon" id="btnNotif" style="position:relative">🔔
+          <span class="nav-item__badge" id="notifBadge" style="position:absolute;top:-6px;right:-6px;display:none">0</span></button>
+        <a class="btn btn--sm" href="/agent">进入工作台</a>
+      </div>
+    </header>
+    <div id="view" style="flex:1;min-height:0"></div>
+  </div>
+</div>
+
+<script src="/assets/common.js"></script>
+<script src="/assets/admin.js"></script>
+</body>
+</html>

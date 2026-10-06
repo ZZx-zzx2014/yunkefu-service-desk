@@ -1,0 +1,54 @@
+{
+  "name": "yunkefu",
+  "version": "1.0.0",
+  "description": "云客客服系统 —— 在线客服 / 工单 / 知识库 / 数据看板 / 管理后台（Node.js + SQLite + WebSocket，零多余依赖）",
+  "type": "module",
+  "main": "server/index.js",
+  "license": "MIT",
+  "keywords": [
+    "customer-service",
+    "helpdesk",
+    "live-chat",
+    "ticketing",
+    "knowledge-base",
+    "websocket",
+    "sqlite",
+    "express",
+    "totp",
+    "2fa"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "start:lan": "node scripts/start-lan.js",
+    "seed": "node server/seed.js",
+    "reset": "node server/seed.js --reset",
+    "cleanup": "node scripts/cleanup.js",
+    "lan": "node scripts/lan.js",
+    "new-secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
+    "firewall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/firewall.ps1",
+    "firewall:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/firewall.ps1 -Remove",
+    "test": "node scripts/test-all.js",
+    "test:api": "node scripts/test-api.js",
+    "test:contract": "node scripts/test-contract.js",
+    "test:2fa": "node scripts/test-2fa.js",
+    "test:upload": "node scripts/test-upload-security.js",
+    "test:realtime": "node scripts/test-realtime.js",
+    "test:notify": "node scripts/test-notify.js",
+    "test:features": "node scripts/test-features.js",
+    "test:migration": "node scripts/test-migration.js",
+    "test:qr": "node scripts/test-qr.js",
+    "test:metrics": "node scripts/check-metrics.js",
+    "check": "node scripts/check-consistency.js",
+    "check:layout": "node scripts/check-layout.js",
+    "check:security": "node scripts/check-security.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.0.1",
+    "ws": "^8.18.0"
+  }
+}

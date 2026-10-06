@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>帮助中心 - 云客客服中心</title>
+<link rel="stylesheet" href="/assets/base.css">
+<style>
+  body { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
+  .box { text-align: center; padding: 40px; }
+  .box__icon { font-size: 58px; margin-bottom: 18px; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="box__icon">📚</div>
+    <h1 style="font-size:22px;font-weight:700">正在前往帮助中心…</h1>
+    <p class="text-muted mt-8">如果没有自动跳转，请点击下方按钮</p>
+    <div class="flex justify-center gap-10 mt-20">
+      <a class="btn btn--primary btn--lg" href="/#/help">进入帮助中心</a>
+      <a class="btn btn--lg" href="/">返回首页</a>
+    </div>
+  </div>
+  <!-- 跳转逻辑放在外部脚本中，避免内联脚本导致 CSP 需要放开 unsafe-inline -->
+  <script src="/assets/common.js"></script>
+  <script src="/assets/help-redirect.js"></script>
+</body>
+</html>
