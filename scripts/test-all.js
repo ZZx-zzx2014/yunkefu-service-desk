@@ -22,6 +22,7 @@ const suites = [
   ['实时通信端到端测试', 'test-realtime.js'],
   ['消息通知场景测试（回归）', 'test-notify.js'],
   ['新增功能专项测试（常用话术 / 文件库）', 'test-features.js'],
+  ['提权与免密码登录安全测试', 'test-privilege.js'],
   ['数据库自动迁移测试', 'test-migration.js'],
   ['看板指标合理性检查', 'check-metrics.js'],
   ['路径归一化单元测试', 'normalize-path.js'],
@@ -35,7 +36,7 @@ try {
   console.log(`服务健康检查通过：${BASE}（uptime ${body.data.uptime}s）`);
 } catch (err) {
   console.error(`\n无法连接服务 ${BASE}：${err.message}`);
-  console.error('请先在另一个终端执行：npm start\n');
+  console.error('请先在另一个终端执行：npm run testmode   （测试需要演示账号与测试模式）\n');
   process.exitCode = 1;
   process.exit(1);
 }
@@ -43,7 +44,9 @@ try {
 const results = [];
 // 多个套件都会反复登录，会命中登录限流（15 次/分钟）。测试期间统一提高上限，
 // 限流本身由 test-2fa.js 的最后一段专门验证。
-const CHILD_ENV = { ...process.env, BASE, KEFU_LOGIN_RATE_LIMIT: '1000' };
+// 同时强制测试模式：套件依赖演示账号与「一键体验」接口，且测试可能创建/修改数据，
+// 不应对着正式库跑（测试自带 KEFU_DB_FILE 隔离时不受影响）。
+const CHILD_ENV = { ...process.env, BASE, KEFU_LOGIN_RATE_LIMIT: '1000', KEFU_TEST_MODE: '1' };
 
 for (const [title, file] of suites) {
   console.log(`\n${'█'.repeat(60)}`);

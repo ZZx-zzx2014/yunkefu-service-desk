@@ -609,3 +609,122 @@ ul, ol { list-style: none; }
   border: 1px solid var(--border); margin-top: 7px; transition: all .15s; text-align: left;
 }
 .demo-account:hover { border-color: var(--brand); background: var(--brand-soft); }
+
+/* ==========================================================================
+   视觉打磨层（v2）—— 不改动上方任何既有规则与类名，仅叠加优化
+   ========================================================================== */
+
+/* ---- 1. 流畅度：统一缓动变量 + 动画可访问性 ---- */
+:root {
+  --ease: cubic-bezier(.2, .8, .3, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .64, 1);
+}
+
+/* 系统开启「减弱动态效果」时停用装饰性动画（可访问性） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+/* ---- 2. 排版细节：数字对齐 + 标题字距 ---- */
+body { font-size: 14px; letter-spacing: .1px; }
+.stat__value, .donut__value, .num { font-variant-numeric: tabular-nums; }
+.card__title, .topbar__title, .modal__title { letter-spacing: .2px; }
+
+/* ---- 3. 交互反馈：焦点可见性（键盘导航）+ 按钮光泽 ---- */
+:focus-visible {
+  outline: 2px solid var(--brand-light);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.btn { position: relative; overflow: hidden; transition: all .18s var(--ease); }
+.btn--primary {
+  box-shadow: 0 1px 2px rgba(37, 99, 235, .35), inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+.btn--primary:hover {
+  box-shadow: 0 4px 12px rgba(37, 99, 235, .35), inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+.btn--primary::after {
+  /* 悬停扫光效果 */
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(105deg, transparent 40%, rgba(255,255,255,.25) 50%, transparent 60%);
+  transform: translateX(-120%);
+  transition: transform .55s var(--ease);
+  pointer-events: none;
+}
+.btn--primary:hover::after { transform: translateX(120%); }
+
+/* ---- 4. 卡片层次：hover 浮起 + 顶部高光边 ---- */
+.card, .stat, .panel { transition: box-shadow .2s var(--ease), transform .2s var(--ease), border-color .2s var(--ease); }
+.stat::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2.5px;
+  background: linear-gradient(90deg, var(--brand-light), var(--accent));
+  opacity: 0; transition: opacity .2s;
+}
+.stat:hover::before { opacity: 1; }
+.stat:hover { transform: translateY(-3px); }
+
+/* ---- 5. 表格与列表：更柔和的斑马纹与行悬停 ---- */
+.table tbody tr:nth-child(even) { background: rgba(248, 250, 252, .55); }
+.table tbody tr:hover { background: var(--brand-softer); }
+.table th {
+  position: sticky; top: 0; z-index: 2;   /* 长表格滚动时表头吸附 */
+}
+
+/* ---- 6. 输入体验：label 微动 + 悬停态 ---- */
+.input, .select, .textarea { transition: border-color .18s var(--ease), box-shadow .18s var(--ease); }
+.input:hover:not(:disabled):not(:focus),
+.select:hover:not(:disabled):not(:focus),
+.textarea:hover:not(:disabled):not(:focus) { border-color: #b9c5dd; }
+
+/* ---- 7. 滚动条与选区配色统一 ---- */
+::-webkit-scrollbar-thumb { background: #c3cddd; }
+::selection { background: rgba(37, 99, 235, .18); }
+
+/* ---- 8. 头像 / 徽章：细微描边提升层次 ---- */
+.avatar { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .22), var(--shadow-xs); }
+.badge { border: 1px solid transparent; }
+.badge--success { border-color: rgba(16, 185, 129, .18); }
+.badge--warning { border-color: rgba(245, 158, 11, .2); }
+.badge--danger  { border-color: rgba(239, 68, 68, .18); }
+.badge--info    { border-color: rgba(99, 102, 241, .18); }
+.badge--brand   { border-color: rgba(37, 99, 235, .18); }
+
+/* ---- 9. 弹窗 / 抽屉：背景模糊加深、更自然的入场 ---- */
+.modal-mask { backdrop-filter: blur(5px) saturate(1.1); background: rgba(15, 23, 42, .45); }
+.modal { animation: modalIn .24s var(--ease-spring); }
+
+/* ---- 10. 空状态更友好 ---- */
+.empty__icon {
+  width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 30px;
+  background: var(--bg-2); opacity: 1;
+}
+
+/* ---- 11. 布局打磨：侧边栏导航指示条 ---- */
+.nav-item { border-radius: 8px; }
+.nav-item::before {
+  content: ''; position: absolute; left: -10px; top: 50%; transform: translateY(-50%) scaleY(0);
+  width: 3px; height: 60%; border-radius: 99px; background: #93c5fd;
+  transition: transform .18s var(--ease);
+}
+.nav-item.is-active::before { transform: translateY(-50%) scaleY(1); }
+.topbar { backdrop-filter: saturate(1.2); }
+
+/* ---- 12. 认证页：渐变动画背景 ---- */
+.auth-page {
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 45%, #0ea5e9 100%);
+  background-size: 180% 180%;
+  animation: authShift 14s ease infinite;
+}
+@keyframes authShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* ---- 13. 性能：合成层提示（仅对确实动画的元素）---- */
+.toast, .modal, .spinner, .skeleton { will-change: transform, opacity; }
+.stat, .btn { will-change: auto; }  /* 卡片与按钮不常动画，避免层爆炸 */

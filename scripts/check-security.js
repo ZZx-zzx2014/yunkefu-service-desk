@@ -224,9 +224,27 @@ check('生产模式缺少密钥时拒绝启动',
 section('C. 测试模式边界（免密码接口必须受限）');
 
 const authSrc = sources.find(({ f }) => f.endsWith(path.join('routes', 'auth.js')))?.text || '';
-check('一键体验接口受 TEST_MODE 保护',
-  /router\.post\(\s*'\/demo'/.test(authSrc) && /if\s*\(!TEST_MODE\)/.test(authSrc),
-  '未在 /demo 路由中检查 TEST_MODE');
+const authCoreSrc = sources.find(({ f }) => f.endsWith(path.join('server', 'auth.js')))?.text || '';
+
+/**
+ * 一键体验接口的三层独立防线（源于一次真实提权报告）：
+ *   1. 编译期：demo 路由只在 if (TEST_MODE) 块内注册 —— 正常模式直接 404
+ *   2. 请求期：路由内部再次校验 TEST_MODE
+ *   3. 令牌层：demo 签发的令牌带 demo:1 标记，正常模式下 verifyAccessToken 拒绝
+ * 任何一层被弱化都会被这里的断言抓出来。
+ */
+check('防线1：demo 路由仅在 if (TEST_MODE) 块内注册（正常模式下 404）',
+  /if\s*\(TEST_MODE\)\s*\{[\s\S]{0,500}?router\.post\(\s*'\/demo'/.test(authSrc),
+  'demo 路由必须在测试模式分支内注册，否则正常模式下接口仍然存在');
+check('防线2：demo 路由内部二次校验 TEST_MODE',
+  /router\.post\(\s*'\/demo'[\s\S]{0,200}?if\s*\(!TEST_MODE\)/.test(authSrc),
+  '路由内部缺少运行时二次校验');
+check('防线3：demo 令牌带 demo 标记',
+  /signAccessToken\([^)]*demo:\s*true|signAccessToken\([^)]*,\s*TOKEN_TTL_MS,\s*\{\s*demo:\s*true\s*\}/.test(authSrc),
+  '演示令牌未带 demo 标记，无法在正常模式下作废');
+check('防线3：verifyAccessToken 拒绝正常模式下的 demo 令牌',
+  /body\.demo === 1 && !TEST_MODE/.test(authCoreSrc),
+  'verifyAccessToken 缺少 demo 标记检查');
 
 const guardSrc = sources.find(({ f }) => f.endsWith('access-guard.js'))?.text || '';
 check('存在来源守卫模块', guardSrc.length > 0);
@@ -242,35 +260,60 @@ check('WebSocket 同样受来源守卫限制',
   /verifyClient/.test(realtimeSrc) && /isPrivateAddress/.test(realtimeSrc),
   'WebSocket 未做来源校验');
 
-check('测试模式默认只监听本机',
+check('测试模式下只监听本机',
   /TEST_MODE[\s\S]{0,200}?\?\s*\(?\s*process\.env\.HOST\s*\|\|\s*'127\.0\.0\.1'/.test(configSrc)
   || /HOST\s*=\s*TEST_MODE[\s\S]{0,120}127\.0\.0\.1/.test(configSrc),
-  '未实现「测试模式默认绑定 127.0.0.1」');
-check('测试模式默认开启（未设置时开启）',
-  /rawTestMode\s*===\s*''[\s\S]{0,80}\?\s*true/.test(configSrc) || /TEST_MODE[\s\S]{0,120}\?\s*true/.test(configSrc));
+  '未实现「测试模式绑定 127.0.0.1」');
+check('默认为正常模式（未设置 KEFU_TEST_MODE 时不进入测试模式）',
+  /\[\s*'1',\s*'true',\s*'on',\s*'yes'\s*\]\.includes\(rawTestMode\)/.test(configSrc),
+  '测试模式必须由显式设置 KEFU_TEST_MODE=1 才开启，不能未设置时默认开启');
+check('正常模式（默认）必须提供 KEFU_SECRET，否则拒绝启动',
+  /!TEST_MODE\s*&&\s*\(!providedSecret/.test(configSrc) && /process\.exit\(1\)/.test(configSrc),
+  '默认模式下使用可预测密钥 = 任何人可伪造管理员令牌');
 
 /* ================= D. 无隐蔽外联 ================= */
 section('D. 无隐蔽外联（不把数据发往第三方）');
+
+/** 功能性外联白名单：站点部署器（仅限 deploy.js 使用，见下方断言） */
+const DEPLOY_HOST_ALLOW = new Set(['github.com', 'codeload.github.com']);
 
 {
   const outbound = [];
   // 收集所有出现的 http(s) 绝对地址，排除注释、文档链接与本地地址
   for (const { f, text } of allSources) {
+    const relFile = path.relative(ROOT, f);
     const lines = text.split(/\r?\n/);
-    lines.forEach((line, i) => {
+    lines.forEach((rawLine) => {
+      const line = rawLine.replace(/--.*$/, '');                // 剪掉 SQL 行注释
       if (/^\s*(\/\/|\*|#)/.test(line)) return;                 // 注释
+      if (/^\s*$/.test(line)) return;
       if (/localhost|127\.0\.0\.1|example\.com|w3\.org|yunkefu\.com/.test(line)) return; // 文档/示例
       for (const m of line.matchAll(/https?:\/\/([A-Za-z0-9.-]+)/g)) {
         const host = m[1];
         if (/^(localhost|127\.|0\.0\.0\.0)/.test(host)) continue;
         // 仅允许出现在 HTML 文档链接与 SVG 命名空间中
         if (f.endsWith('.html') || f.endsWith('.css')) continue;
-        outbound.push(`${path.relative(ROOT, f)}: ${host}`);
+        // 已知且有据可查的功能性主机：站点部署器只从 GitHub 拉取用户指定的仓库，
+        // URL 受 deploy.js 的 REPO_RE 严格白名单约束（见下方断言），
+        // 不构成隐蔽外联（数据只出不进，且目标由管理员在界面上明确选择）。
+        if (DEPLOY_HOST_ALLOW.has(host)) {
+          if (relFile !== 'server\\deploy.js' && relFile !== 'server/deploy.js') {
+            outbound.push(`${relFile}: ${host}（部署主机只允许出现在 deploy.js）`);
+          }
+          return;
+        }
+        outbound.push(`${relFile}: ${host}`);
       }
     });
   }
-  check('代码中无向第三方发送请求的地址', outbound.length === 0,
+  check('代码中无向第三方发送请求的地址（部署白名单除外）', outbound.length === 0,
     outbound.length ? outbound.slice(0, 6).join(' | ') : '未发现外部主机');
+
+  // 部署白名单的前提：deploy.js 只接受 github.com 的仓库地址（防 SSRF / 任意主机）
+  const deploySrc = sources.find(({ f }) => f.endsWith('deploy.js'))?.text || '';
+  const hasGithubAllow = deploySrc.includes('REPO_RE')
+    && deploySrc.includes('github\\.com\\/([A-Za-z0-9_.-]+)\\/');
+  check('部署器仓库地址受 github.com 严格白名单约束（防 SSRF）', hasGithubAllow);
 
   // fetch 调用应只指向站内相对路径
   const externalFetch = [];

@@ -25,8 +25,8 @@ npm test                  # 全部测试套件（含安全自检）
 | 维度 | 关键断言 |
 | --- | --- |
 | 认证 | 每个业务路由都挂了 `requireAuth`/`requireRole`；公开路由必须显式列入白名单；无 `skipAuth`/`bypass`/万能口令/用户模拟 |
-| 凭据 | 签名密钥只来自 `process.env.KEFU_SECRET`；无可用固定默认值；生产模式缺密钥时 `process.exit(1)`；日志不打印密钥 |
-| 测试模式 | `/api/auth/demo` 受 `TEST_MODE` 保护；HTTP 与 WebSocket 都经过来源守卫；默认只监听 `127.0.0.1` |
+| 凭据 | 签名密钥只来自 `process.env.KEFU_SECRET`；无可用固定默认值；正常模式（默认）缺密钥时 `process.exit(1)`；日志不打印密钥 |
+| 测试模式 | `/api/auth/demo` 受 `TEST_MODE` 保护；HTTP 与 WebSocket 都经过来源守卫；测试模式只监听 `127.0.0.1`；**默认为正常模式，测试模式必须显式进入** |
 | 外联 | 源码中无第三方主机；前端 `fetch` 只访问站内地址；依赖中无埋点/遥测库 |
 | 依赖 | 运行时依赖 ≤3；无前端构建依赖；无原生编译依赖；有 lockfile |
 | 敏感文件 | `.env`、数据库、上传目录均在 `.gitignore`；仓库根目录无数据库残留 |
@@ -78,11 +78,11 @@ git push -u origin main
 
 发布前请确认 README 中这几处仍然准确（改动默认值时要同步更新）：
 
-1. **测试模式是默认状态**，只监听 `127.0.0.1`，`/api/auth/demo` 免密码可用
-2. **对外服务模式**（`KEFU_TEST_MODE=0`）必须提供 `KEFU_SECRET`，否则拒绝启动
+1. **正常模式是默认状态**（`npm start`），监听所有网卡，**必须配置 `KEFU_SECRET`**，`/api/auth/demo` 已禁用
+2. **测试模式需显式进入**（`npm run testmode` 或 `KEFU_TEST_MODE=1`），只监听 `127.0.0.1`，一键体验可用
 3. **演示账号是弱口令**，对外部署前必须修改或删除
-4. **手机扫码接入需要先放开监听**（`HOST=0.0.0.0`）并放行防火墙
-5. 局域网模式仍然只接受私有网段来源，不应在公用网络使用
+4. **手机扫码接入**直接用正常模式即可（默认监听所有网卡），需要时放行防火墙
+5. 请勿在公用网络（咖啡馆 Wi-Fi 等）下使用
 
 ---
 
@@ -99,8 +99,25 @@ git push -u origin main
 | 路由或中间件 | `npm run check:security` + `npm run check` |
 | 页面布局 / 滚动 | `npm run check:layout` |
 | 数据库结构 | `npm run test:migration` |
-| 提交前 | `npm test` |
+| 启动模式 / 安全默认值 | `npm run check:security`（含「默认正常模式」断言） |
+| 提交前 | `npm test`（需先以测试模式启动服务：`npm run testmode`） |
+| 提权 / 免密码接口 | `npm run test:privilege`（自包含双实例动态验证） |
 
 新增**公开**路由时，必须在 `scripts/check-security.js` 的 `PUBLIC_ROUTES`
 中显式声明（键为 `文件名 方法 /路径`），否则自检会失败 —— 这是刻意设计，
 避免有人无意中把需要鉴权的接口暴露出去。
+
+## 七、暂缓上线的子系统
+
+**站点托管**（`server/routes/sites.js`、`server/php.js`、`server/deploy.js`）已实现但
+**未接入主服务**：`index.js` 中的挂载语句处于注释状态。原因：它曾因
+导入错误阻断服务启动（`audit` 误从 `middleware.js` 导入），暴露出新模块在
+接入主入口前缺少「启动冒烟」环节。重新接入的步骤：
+
+1. 取消 `index.js` 中两处 `sites` 相关注释（import 与挂载）
+2. `node --check server/routes/sites.js server/php.js server/deploy.js`
+3. `npm run testmode` 确认服务能启动、横幅正常
+4. 新增 `test-sites.js` 套件（创建/部署/删除/越权/路径逃逸/PHP 隔离）
+5. 通过后按上文流程提交
+
+在完成第 4 步之前，请勿在对外环境接入该子系统。

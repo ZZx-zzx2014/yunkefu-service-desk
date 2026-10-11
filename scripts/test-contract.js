@@ -7,7 +7,12 @@
  * 「xxx.slice 不是函数」这类难以定位的错误。
  * 本测试把每个接口的形状固化为断言，防止再次发生破坏性变更。
  */
+import http from 'node:http';
+
 const BASE = process.env.BASE || 'http://127.0.0.1:3000';
+const BASE_URL = new URL(BASE);
+const BASE_HOST = BASE_URL.hostname;
+const BASE_PORT = BASE_URL.port || '80';
 
 let pass = 0;
 let fail = 0;
@@ -197,6 +202,83 @@ section('静态资源缓存策略（防止浏览器执行旧版前端）');
     check(`${label} 使用协商缓存（no-cache/must-revalidate）`,
       /no-cache|must-revalidate/.test(cc), `Cache-Control: ${cc}`);
   }
+}
+
+/* ---------------- 安全响应头（扫描器告警回归） ---------------- */
+section('安全响应头');
+{
+  const r = await fetch(BASE + '/');
+  // Burp 曾报「X-XSS-Protection: 0 禁用了浏览器 XSS 过滤器」（信息级，CWE-16）。
+  // 修复取值 1; mode=block；用断言锁定，防止回退到 0。
+  const xss = r.headers.get('x-xss-protection') || '';
+  check('X-XSS-Protection 为 block 模式（非禁用）',
+    /^1;\s*mode=block/i.test(xss), `实际值：${xss || '缺失'}`);
+  check('X-Content-Type-Options: nosniff',
+    (r.headers.get('x-content-type-options') || '').toLowerCase() === 'nosniff');
+  const csp = r.headers.get('content-security-policy') || '';
+  check('CSP 存在且 script-src 不含 unsafe-inline',
+    /script-src[^;]*'self'/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp),
+    csp ? 'script-src 段含 unsafe-inline' : 'CSP 缺失');
+  check('X-Frame-Options 限制同源',
+    /sameorigin/i.test(r.headers.get('x-frame-options') || ''));
+}
+
+/* ---------------- 响应压缩（gzip 加速） ---------------- */
+section('响应压缩（零依赖 gzip，加速访问）');
+{
+  /**
+   * 注意：Node 的 fetch(undici) 会自动解压带 Content-Encoding 的响应体，
+   * 用它比较“压缩前后大小”永远相等（这正是本测试曾误报的原因）。
+   * 因此这里用原始 http 模块拿真实字节，以 gzip 魔数(1f 8b)与
+   * content-length 与原文之比作为判定依据。
+   */
+  const rawBytes = (path, acceptEncoding) => new Promise((resolve, reject) => {
+    http.request({ host: BASE_HOST, port: BASE_PORT, path, headers: acceptEncoding ? { 'Accept-Encoding': acceptEncoding } : {} }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({
+        encoding: res.headers['content-encoding'] || '',
+        length: res.headers['content-length'],
+        bytes: Buffer.concat(chunks),
+      }));
+    }).on('error', reject).end();
+  });
+
+  // 场景1：CSS —— 应返回真 gzip
+  const gz = await rawBytes('/assets/base.css', 'gzip');
+  const isRealGzip = gz.bytes[0] === 0x1f && gz.bytes[1] === 0x8b;
+  check('CSS 返回真 gzip（魔数 1f8b）', isRealGzip,
+    `Content-Encoding: ${gz.encoding || '无'} · 前2字节 ${gz.bytes.subarray(0, 2).toString('hex')}`);
+
+  // 场景2：压缩率 —— 用 content-length（线上传输大小）对比 identity 的实际字节
+  const plain = await rawBytes('/assets/base.css', 'identity');
+  const saved = plain.bytes.byteLength ? (1 - gz.bytes.byteLength / plain.bytes.byteLength) : 0;
+  check('压缩率有效（体积减少 ≥ 40%）', isRealGzip && saved >= 0.4,
+    `原始 ${plain.bytes.byteLength}B → 线上传输 ${gz.bytes.byteLength}B（省 ${(saved * 100).toFixed(0)}%）`);
+
+  const varyOk = await new Promise((resolve) => {
+    http.request({ host: BASE_HOST, port: BASE_PORT, path: '/assets/base.css', headers: { 'Accept-Encoding': 'gzip' } }, (res) => {
+      resolve(/accept-encoding/i.test(res.headers.vary || ''));
+      res.resume();
+    }).end();
+  });
+  check('压缩响应带 Vary: Accept-Encoding（缓存正确性）', varyOk);
+
+  // 场景3：无压缩能力客户端拿原文
+  check('无压缩能力时返回原始内容（兼容性）',
+    plain.encoding === '' && plain.bytes.byteLength > 1024 && plain.bytes.subarray(0, 2).toString('hex') !== '1f8b',
+    `Content-Encoding: ${plain.encoding || '无'}`);
+
+  // 场景4：大 JSON 同样压缩
+  const jsonGz = await rawBytes('/api/kb/articles?pageSize=50', 'gzip');
+  check('JSON 接口同样压缩（响应体 > 1KB）',
+    jsonGz.bytes[0] === 0x1f && jsonGz.bytes[1] === 0x8b,
+    `Content-Encoding: ${jsonGz.encoding || '无'}`);
+
+  // 场景5：小响应按设计跳过
+  const small = await rawBytes('/api/health', 'gzip');
+  check('小响应（< 1KB）按设计跳过压缩',
+    small.encoding === '', `Content-Encoding: ${small.encoding || '无'}`);
 }
 
 console.log(`\n${'═'.repeat(56)}`);

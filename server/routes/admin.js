@@ -119,6 +119,10 @@ router.put('/users/:id', adminOnly, asyncHandler((req, res) => {
   if (user.role === 'admin' && active === 0 && get("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1").c <= 1) {
     return fail(res, '至少需要保留一个启用状态的管理员');
   }
+  // 不能把自己降级/停用：防止管理员误操作后系统失去管理者
+  if (user.id === req.user.id && role && role !== 'admin') {
+    return fail(res, '不能修改自己的角色');
+  }
 
   run(`
     UPDATE users SET
@@ -138,7 +142,13 @@ router.put('/users/:id', adminOnly, asyncHandler((req, res) => {
     const { hash, salt } = hashPassword(password);
     run('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?', [hash, salt, user.id]);
   }
-  audit(req.user, '更新账号', user.username, `${name || user.name}`);
+  // 角色变更是高危操作：无论是否变更都明确记录旧值与新值，便于审计回溯
+  if (role && role !== user.role) {
+    audit(req.user, '变更账号角色', user.username, `${user.role} → ${role}${user.id === req.user.id ? '（本人）' : ''}`);
+  }
+  const detailParts = [name || user.name];
+  if (password) detailParts.push('（已重置密码）');
+  audit(req.user, '更新账号', user.username, detailParts.join(' '));
   return ok(res, get('SELECT id, username, name, role, status, active FROM users WHERE id = ?', [user.id]), '账号已更新');
 }));
 

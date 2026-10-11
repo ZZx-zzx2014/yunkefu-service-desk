@@ -12,7 +12,7 @@ import {
 } from '../totp.js';
 import { ok, fail, asyncHandler, requireAuth } from '../middleware.js';
 import { rateLimit, parseJSON } from '../utils.js';
-import { LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW_MS, TWO_FACTOR_RATE_LIMIT, TWO_FACTOR_RATE_WINDOW_MS, TWO_FACTOR_ADMIN_RATE_LIMIT, TEST_MODE } from '../config.js';
+import { LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW_MS, TWO_FACTOR_RATE_LIMIT, TWO_FACTOR_RATE_WINDOW_MS, TWO_FACTOR_ADMIN_RATE_LIMIT, TEST_MODE, TOKEN_TTL_MS } from '../config.js';
 
 const router = Router();
 
@@ -323,25 +323,39 @@ router.get('/settings', asyncHandler((_req, res) => {
 /**
  * POST /api/auth/demo 一键体验（仅测试模式可用）
  *
- * 安全说明：该接口会「免密码」签发账号令牌，其中包含管理员账号。
- * 因此必须严格限制在测试模式下，且测试模式只监听本机、只接受私有网段来源。
- * 生产模式（KEFU_TEST_MODE=0）下此接口直接返回 403。
+ * ⚠️ 安全边界（多层独立防线，任何一层都不依赖其它层）：
+ *
+ *  1. 编译期：模块加载时检查 TEST_MODE，非测试模式下根本不注册该路由，
+ *     请求会落到 /api 404 兜底 —— 即使运行时开关被误改，路由也不存在。
+ *  2. 请求期：路由内部再次校验 TEST_MODE（双保险）。
+ *  3. 签发范围：只允许映射到 seed 的演示账号白名单，
+ *     且这些账号在测试模式下才允许免密码签发令牌。
+ *
+ * 为什么这么严格：该接口会「免密码」签发含管理员在内的演示账号令牌。
+ * 曾有安全报告（用户用 Burp 把登录请求体改成 {role:'admin'} 即可拿管理员身份），
+ * 因此正常模式下它必须彻底不存在，而不仅是“返回 403”。
  */
-router.post('/demo', asyncHandler((req, res) => {
-  if (!TEST_MODE) {
-    return fail(res, '一键体验仅在测试模式下可用。如需使用，请以 KEFU_TEST_MODE=1 启动；对外服务请使用账号密码登录。', 403);
-  }
-  const role = String(req.body?.role || 'customer');
-  const map = { customer: 'user1', agent: 'agent1', admin: 'admin' };
-  const username = map[role] || 'user1';
-  const user = get('SELECT * FROM users WHERE username = ?', [username]);
-  if (!user) return fail(res, '演示账号不存在，请先运行 npm run seed');
-  const ip = req.ip || '';
-  run("UPDATE users SET last_login_at = datetime('now','localtime') WHERE id = ?", [user.id]);
-  audit(user, '测试模式一键登录', user.username, `以 ${user.role} 身份进入（仅测试模式）`, ip);
-  const token = signAccessToken(user);
-  return ok(res, { token, user: publicUser(user) }, '已进入测试模式');
-}));
+const DEMO_ACCOUNTS = { customer: 'user1', agent: 'agent1', admin: 'admin' };
+
+if (TEST_MODE) {
+  router.post('/demo', asyncHandler((req, res) => {
+    // 请求期二次校验（防运行时配置被篡改）
+    if (!TEST_MODE) {
+      return fail(res, '一键体验仅在测试模式下可用', 403);
+    }
+    const role = String(req.body?.role || 'customer');
+    const username = DEMO_ACCOUNTS[role] || DEMO_ACCOUNTS.customer;
+    const user = get('SELECT * FROM users WHERE username = ? AND role = ?', [username, role]);
+    if (!user) return fail(res, '演示账号不存在，请先运行 npm run seed');
+    const ip = req.ip || '';
+    run("UPDATE users SET last_login_at = datetime('now','localtime') WHERE id = ?", [user.id]);
+    audit(user, '测试模式一键登录', user.username, `以 ${user.role} 身份进入（仅测试模式）`, ip);
+    // 演示令牌：带 demo 标记 —— 切换到正常模式后立即失效（见 verifyAccessToken）
+    const token = signAccessToken(user, TOKEN_TTL_MS, { demo: true });
+    return ok(res, { token, user: publicUser(user) }, '已进入测试模式');
+  }));
+}
+// 非测试模式：路由根本不注册，POST /api/auth/demo 直接 404（接口不存在）
 
 export default router;
 export { publicUser };

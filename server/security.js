@@ -36,7 +36,11 @@ export function securityHeaders(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('X-XSS-Protection', '0'); // 依赖 CSP，关闭过时的审计器
+  // XSS 过滤器：按 CWE-16 建议「1; mode=block」而非「0」。
+  // 说明：该头仅作用于老浏览器（IE/旧版 Safari），现代浏览器已废弃该机制
+  // 并完全依赖下方 CSP；但保留 block 模式能让老浏览器在检测到反射型 XSS 时
+  // 渲染空白页而不是尝试过滤，同时让安全扫描不再报「过滤器被禁用」。
+  res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader(
     'Content-Security-Policy',
     [

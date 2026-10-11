@@ -15,6 +15,12 @@ db.exec(`
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+-- 性能调优：WAL 模式下 synchronous=NORMAL 兼顾持久性与写入速度（掉电最多丢最后一个事务，不会损坏库）
+PRAGMA synchronous = NORMAL;
+-- 页缓存 16MB（默认 2MB），减少热点数据读盘
+PRAGMA cache_size = -16000;
+-- 临时表/排序放内存，加速列表页 ORDER BY
+PRAGMA temp_store = MEMORY;
 `);
 
 /* ------------------------------------------------------------------ *
@@ -129,6 +135,11 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
 CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_id);
 CREATE INDEX IF NOT EXISTS idx_conv_customer ON conversations(customer_id);
+-- 列表页高频排序：按会话状态 + 最近消息时间取 Top N
+CREATE INDEX IF NOT EXISTS idx_conv_status_lastmsg ON conversations(status, last_message_at DESC);
+-- 工作台「我的会话」与客户历史查询
+CREATE INDEX IF NOT EXISTS idx_conv_agent_status ON conversations(agent_id, status, last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conv_cust_status ON conversations(customer_id, status, last_message_at DESC);
 
 -- 消息
 CREATE TABLE IF NOT EXISTS messages (
@@ -144,6 +155,8 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id);
+-- 未读数统计与「最新消息」查询
+CREATE INDEX IF NOT EXISTS idx_msg_conv_read ON messages(conversation_id, is_read);
 
 -- 快捷话术
 CREATE TABLE IF NOT EXISTS quick_replies (
@@ -183,6 +196,11 @@ CREATE TABLE IF NOT EXISTS tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_status ON tickets(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_assignee ON tickets(assignee_id);
+-- 工单列表页按状态+更新时间分页；创建者的「我的工单」
+CREATE INDEX IF NOT EXISTS idx_ticket_status_updated ON tickets(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticket_creator ON tickets(creator_id, updated_at DESC);
+-- 看板趋势按创建时间聚合
+CREATE INDEX IF NOT EXISTS idx_ticket_created ON tickets(created_at);
 
 -- 工单处理记录
 CREATE TABLE IF NOT EXISTS ticket_comments (
@@ -225,6 +243,10 @@ CREATE TABLE IF NOT EXISTS kb_articles (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_kb_status ON kb_articles(status);
+-- 帮助中心列表（公开已发布文章按更新时间），热门文章按浏览量
+CREATE INDEX IF NOT EXISTS idx_kb_pub ON kb_articles(status, visibility, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_views ON kb_articles(status, visibility, views DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_category ON kb_articles(category_id);
 
 -- 系统设置
 CREATE TABLE IF NOT EXISTS settings (
@@ -258,6 +280,43 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, is_read);
+
+-- 站点托管：每个站点是一个独立的「虚拟主机」
+CREATE TABLE IF NOT EXISTS sites (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug          TEXT NOT NULL UNIQUE,                 -- 访问路径 /s/<slug>
+  name          TEXT NOT NULL,                        -- 显示名
+  type          TEXT NOT NULL DEFAULT 'static',       -- static | php
+  php_version   TEXT DEFAULT '',                      -- PHP 版本标识（type=php 时必填）
+  root_dir      TEXT DEFAULT '',                      -- 站点根目录（相对 SITES_DIR；部署后自动填写）
+  source        TEXT NOT NULL DEFAULT 'manual',      -- manual | github
+  repo_url      TEXT DEFAULT '',                      -- GitHub 仓库（https://github.com/<o>/<r>）
+  repo_ref      TEXT DEFAULT 'main',                  -- 分支 / tag / commit
+  sub_dir       TEXT DEFAULT '',                      -- 仓库内的站点根（如 docs/ 或 /）
+  status        TEXT NOT NULL DEFAULT 'stopped',      -- running | stopped | error
+  last_error    TEXT DEFAULT '',
+  deploy_log    TEXT DEFAULT '',                      -- 最近一次部署摘要（JSON：步骤+耗时）
+  size_bytes    INTEGER NOT NULL DEFAULT 0,
+  created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_sites_status ON sites(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sites_slug ON sites(slug);
+
+-- 站点部署历史（每次部署一条记录）
+CREATE TABLE IF NOT EXISTS site_deploys (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id    INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  source     TEXT NOT NULL,                           -- manual | github
+  ref        TEXT DEFAULT '',
+  status     TEXT NOT NULL,                           -- success | failed
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  detail     TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_deploys_site ON site_deploys(site_id, id);
+
 `);
 
 /* ------------------------------------------------------------------ *

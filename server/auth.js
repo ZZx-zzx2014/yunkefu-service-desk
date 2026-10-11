@@ -3,7 +3,7 @@
  * 避免引入 bcrypt / jsonwebtoken 等额外依赖。
  */
 import crypto from 'node:crypto';
-import { SECRET, TOKEN_TTL_MS } from './config.js';
+import { SECRET, TOKEN_TTL_MS, TEST_MODE } from './config.js';
 
 export function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('hex');
@@ -29,10 +29,16 @@ export function signToken(payload, ttl = TOKEN_TTL_MS) {
 
 /**
  * 签发访问令牌（可用于访问业务接口）
- * purpose 固定为 'access'，与 2FA 待验证令牌严格区分
+ * purpose 固定为 'access'，与 2FA 待验证令牌严格区分。
+ * 可选 demo:1 标记 —— 一键体验签发的令牌带上它，
+ * verifyToken 校验时若发现该标记但当前已非测试模式，直接作废。
+ * 这意味着：测试模式下拿到的演示令牌，切换到正常模式后立即失效，
+ * 攻击者无法「先在测试模式拿令牌、再带去正常模式复用」。
  */
-export function signAccessToken(user, ttl = TOKEN_TTL_MS) {
-  return signToken({ id: user.id, role: user.role, purpose: 'access' }, ttl);
+export function signAccessToken(user, ttl = TOKEN_TTL_MS, opts = {}) {
+  const body = { id: user.id, role: user.role, purpose: 'access' };
+  if (opts.demo) body.demo = 1;
+  return signToken(body, ttl);
 }
 
 /**
@@ -72,11 +78,16 @@ export function verifyToken(token) {
  *
  * 服务端签发的访问令牌一定带 purpose；不带 purpose 的令牌只可能来自
  * 密钥泄露后的人为构造，因此这里一律拒绝，不做「历史兼容」放行。
+ *
+ * 演示令牌的额外约束：demo:1 标记的令牌只在测试模式下有效。
+ * 正常模式下出现 demo 标记 → 直接拒绝（防止测试期令牌被带到生产复用）。
  */
 export function verifyAccessToken(token) {
   const body = verifyToken(token);
   if (!body) return null;
-  return body.purpose === 'access' ? body : null;
+  if (body.purpose !== 'access') return null;
+  if (body.demo === 1 && !TEST_MODE) return null;
+  return body;
 }
 
 /** 校验 2FA 待验证令牌 */

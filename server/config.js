@@ -22,36 +22,42 @@ export const ROOT = path.resolve(SERVER_DIR, '..');
 export const PUBLIC_DIR = path.join(ROOT, 'public');
 export const DATA_DIR = path.join(ROOT, 'data');
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+/** 站点托管根目录：每个站点一个独立子目录（与 kefu 本体完全隔离） */
+export const SITES_DIR = process.env.KEFU_SITES_DIR
+  ? path.resolve(process.env.KEFU_SITES_DIR)
+  : path.join(DATA_DIR, 'sites');
 export const DB_FILE = process.env.KEFU_DB_FILE
   ? path.resolve(process.env.KEFU_DB_FILE)
   : path.join(DATA_DIR, 'kefu.db');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(SITES_DIR, { recursive: true });
 
 export const PORT = Number(process.env.PORT || 3000);
 
 /* ------------------------------------------------------------------ *
- * 测试模式
+ * 运行模式
  *
- * 默认「开启」。测试模式下：
- *   - 只监听本机（127.0.0.1），不对外暴露
- *   - 拒绝来自公网地址的请求（纵深防御）
- *   - 允许免密码的一键体验账号（/api/auth/demo）
+ * 默认「正常模式」（对外服务模式）。测试模式需要显式进入：
+ *   npm run testmode     # 等价于 KEFU_TEST_MODE=1 npm start
  *
- * 关闭测试模式（KEFU_TEST_MODE=0）即为「对外服务模式」：
+ * 正常模式（默认，KEFU_TEST_MODE 未设置或为 0）：
+ *   - 监听 0.0.0.0（可用 HOST 覆盖），供局域网/公网访问
  *   - 必须自行提供 KEFU_SECRET，否则拒绝启动
- *   - 一键体验接口会被禁用
- *   - 监听 0.0.0.0（可用 HOST 覆盖）
+ *   - 免密码的「一键体验」接口被禁用
+ *
+ * 测试模式（KEFU_TEST_MODE=1）：
+ *   - 未提供 KEFU_SECRET 时用进程内随机密钥（重启后旧令牌失效）
+ *   - 只监听本机（127.0.0.1，可用 HOST 覆盖），且拒绝公网来源
+ *   - 允许一键体验账号（含管理员），仅限本地/可信局域网试用
  * ------------------------------------------------------------------ */
 
 const rawTestMode = String(process.env.KEFU_TEST_MODE ?? '').trim().toLowerCase();
-/** 未设置时默认开启测试模式（安全默认值） */
-export const TEST_MODE = rawTestMode === ''
-  ? true
-  : !['0', 'false', 'no', 'off'].includes(rawTestMode);
+/** 默认为正常模式（false）；仅当显式设置为 1/true/on 时进入测试模式 */
+export const TEST_MODE = ['1', 'true', 'on', 'yes'].includes(rawTestMode);
 
-/** 监听地址：测试模式默认本机（可用 HOST 显式放开，仍受来源守卫保护） */
+/** 监听地址：正常模式默认所有网卡；测试模式默认本机（均可用 HOST 覆盖） */
 export const HOST = TEST_MODE
   ? (process.env.HOST || '127.0.0.1')
   : (process.env.HOST || '0.0.0.0');
@@ -75,19 +81,22 @@ const DEFAULT_INSECURE_SECRETS = new Set([
 const providedSecret = String(process.env.KEFU_SECRET || '').trim();
 
 if (!TEST_MODE && (!providedSecret || DEFAULT_INSECURE_SECRETS.has(providedSecret))) {
-  // 对外服务时使用可预测的密钥 = 任何人都能伪造管理员令牌，必须拒绝启动
+  // 正常模式（默认）使用可预测的密钥 = 任何人都能伪造管理员令牌，必须拒绝启动
   console.error(`
-  ⛔ 拒绝启动：生产模式必须提供你自己的 KEFU_SECRET
+  ⛔ 拒绝启动：请先设置 KEFU_SECRET（令牌签名密钥）
 
      生成一个强密钥（任选其一）：
 
-       node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+       npm run new-secret
 
        # 或在 .env 中配置（参考 .env.example）
        KEFU_SECRET=<粘贴上面生成的随机串>
 
-     如果你只是想在本地/局域网试用，请不要设置 KEFU_TEST_MODE，
-     直接用默认的测试模式启动即可（仅本机可访问）。
+     说明：默认的正常模式会监听所有网卡供局域网访问，
+     所以必须保证密钥不可猜测。
+     如果你只是想本地试用，可以用测试模式（仅本机可访问，一键体验可用）：
+
+       npm run testmode
 `);
   process.exit(1);
 }

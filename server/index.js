@@ -13,10 +13,12 @@ import { getSettings } from './db.js';
 import { attachUser, errorHandler, ok, fail } from './middleware.js';
 import { securityHeaders, serveUpload } from './security.js';
 import { localOnlyGuard } from './access-guard.js';
+import { compress } from './compress.js';
 import { initRealtime } from './realtime.js';
 import { listAccessAddresses, primaryAddress, kindLabel } from './netinfo.js';
 import { toPNG, toSVG, toDataURI, toTerminal } from './qrcode.js';
 import { renderLanPage } from './lanpage.js';
+import { listPhpVersions } from './php.js';
 
 import authRoutes from './routes/auth.js';
 import conversationRoutes from './routes/conversations.js';
@@ -24,10 +26,17 @@ import ticketRoutes from './routes/tickets.js';
 import kbRoutes from './routes/kb.js';
 import dashboardRoutes from './routes/dashboard.js';
 import adminRoutes from './routes/admin.js';
+// 站点托管子系统暂缓挂载：sites.js 存在两处缺陷（audit 导入来源错误已修，
+// serveSiteFile 内引用未定义的 next），且未经完整验证。
+// 安排：单独修复并验证后，再取消注释接入。见 PUBLISHING.md 待办。
+// import siteAdminRoutes, { siteHostApp } from './routes/sites.js';
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
+
+// 压缩必须在最前（拦截 res.write/end，对 JSON 与静态资源都生效）
+app.use(compress());
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -64,6 +73,8 @@ app.use('/api/tickets', ticketRoutes);
 app.use('/api/kb', kbRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/admin', adminRoutes);
+// 站点托管：管理端接口（暂缓挂载，见顶部说明）
+// app.use('/api/admin/sites', siteAdminRoutes);
 
 /* ------------------------------ 局域网接入 / 二维码 ------------------------------ */
 
@@ -114,15 +125,26 @@ app.get('/api/qr', (req, res) => {
 
 app.use('/api', (_req, res) => fail(res, '接口不存在', 404));
 
+/* ------------------------------ 站点托管（/s/<slug>/） ------------------------------ */
+// 访问端暂缓挂载（见顶部说明）：
+// app.use('/s', siteHostApp());
+
 /* ------------------------------ 静态资源 ------------------------------ */
 // 上传文件走专用中间件：强制 nosniff、非图片强制下载、禁止任何主动内容执行
 app.use('/uploads', serveUpload);
-// 页面与脚本每次协商校验，避免浏览器执行旧版前端代码
+/**
+ * 静态资源缓存策略：
+ *  - HTML 页面：no-cache —— 每次协商校验，保证用户总是拿到新版入口
+ *  - JS/CSS：no-cache —— 同上；因未做文件指纹，改版本仍靠协商缓存兜底
+ *  - 其它（favicon 等）：允许短缓存
+ * 上传的图片等用户内容走 /uploads，不在此列。
+ */
 app.use(express.static(PUBLIC_DIR, { extensions: ['html'], setHeaders: (res, filePath) => {
   const p = filePath.toLowerCase();
-  const mustRevalidate = p.endsWith('.js') || p.endsWith('.css') || p.endsWith('.html');
-  res.setHeader('Cache-Control', mustRevalidate ? 'no-cache, must-revalidate' : 'public, max-age=3600');
+  const isPage = p.endsWith('.html') || p.endsWith('.js') || p.endsWith('.css');
+  res.setHeader('Cache-Control', isPage ? 'no-cache, must-revalidate' : 'public, max-age=86400');
 } }));
+// express.static 自带 ETag/Last-Modified 协商，命中 304 时无响应体，二次访问几乎零开销
 
 // 前端三个端口的入口
 const sendPage = (file) => (_req, res) => res.sendFile(path.join(PUBLIC_DIR, file));
@@ -217,20 +239,19 @@ server.listen(PORT, HOST, () => {
      · 「一键体验」可用：可免密码以演示账号进入，包含管理员
      · 请勿用于对外提供服务；不要将本机端口映射到公网
 
-     切换到对外服务模式：设置 KEFU_TEST_MODE=0 并提供 KEFU_SECRET
-     （详见 README 的「测试模式与对外部署」）`);
+     切换到正常模式（对外服务）：直接 npm start（需在 .env 配置 KEFU_SECRET）`);
   } else {
     console.log(`
-  ── 对外服务模式 ────────────────────────────────────────────
+  ── 正常模式（对外服务）─────────────────────────────────────
 
-     · 未启用测试模式，「一键体验」接口已禁用
-     · 请确保已配置 KEFU_SECRET，并建议通过反向代理启用 HTTPS`);
+     · 监听 ${HOST}，局域网内设备可直接访问
+     · 「一键体验」接口已禁用；如需本地演示请用 npm run testmode`);
     if (ACCESS.secretIsWeak) {
       console.log('     · ⚠️  检测到 KEFU_SECRET 过弱或为示例值，请尽快更换为随机强密钥');
     }
   }
 
-  if (ACCESS.secretIsEphemeral) {
+  if (ACCESS.secretIsEphemeral && ACCESS.testMode) {
     console.log(`
   ⚠️  未设置 KEFU_SECRET，本次使用「进程内随机密钥」
      服务重启后所有已登录会话将失效。`);
@@ -243,6 +264,8 @@ server.listen(PORT, HOST, () => {
      客服工作台     http://localhost:${PORT}/agent
      管理后台       http://localhost:${PORT}/admin
      帮助中心       http://localhost:${PORT}/help`);
+
+  // 站点托管子系统暂缓上线：/s/ 路由未挂载，提示一并隐藏（见 PUBLISHING.md 待办）
 
   if (ACCESS.testMode) {
     console.log(`
@@ -267,17 +290,15 @@ server.listen(PORT, HOST, () => {
   } else {
     console.log(`
   ── 手机扫码接入 ────────────────────────────────────────────
-     当前仅监听 ${HOST}，手机无法访问。如需手机接入，二选一：
+     当前仅监听 ${HOST}，手机无法访问。如需手机接入：
 
-       ① 仍用测试模式，仅放开监听（安全，只接受私有网段来源）
-          HOST=0.0.0.0 npm start
-
-       ② 切换到对外服务模式（请务必自备强密钥）
-          KEFU_TEST_MODE=0 KEFU_SECRET=<强密钥> npm start`);
+       npm start                 （正常模式，监听所有网卡，需 KEFU_SECRET）
+       npm run start:lan         （同上，附局域网地址提示）`);
 
     if (ACCESS.testMode) {
       console.log(`
-     放开监听后可用 npm run lan 查看二维码与局域网地址。`);
+     或保持测试模式并放开监听（只接受私有网段来源）：
+       HOST=0.0.0.0 npm run testmode`);
     }
   }
   console.log('');

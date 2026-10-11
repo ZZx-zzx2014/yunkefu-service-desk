@@ -938,8 +938,33 @@
   registerAction('go-back', () => { history.back(); });
   registerAction('redirect-help', () => { location.replace('/#/help'); });
 
-  // 启动即拉取站点配置
+  // 启动即拉取站点配置。
+  // 性能：缓存到 sessionStorage（60 秒内不重复请求），
+  // 同一会话内来回切换页面不再重复等待这个接口；设置变更由管理端广播刷新。
+  const SETTINGS_CACHE_KEY = 'kefu:settings';
+  const SETTINGS_CACHE_TTL = 60_000;
+  const applySettings = (s, fromCache) => {
+    state.settings = s || {};
+    document.dispatchEvent(new CustomEvent('settings:ready', { detail: s, ...(fromCache ? { cached: true } : {}) }));
+  };
+  let cached = null;
+  try {
+    const raw = sessionStorage.getItem(SETTINGS_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Date.now() - parsed.t < SETTINGS_CACHE_TTL && parsed.s) {
+        cached = parsed;
+        applySettings(parsed.s, true);
+      }
+    }
+  } catch { /* 缓存损坏则忽略 */ }
   api.get('/api/auth/settings', { noRedirect: true })
-    .then((s) => { state.settings = s || {}; document.dispatchEvent(new CustomEvent('settings:ready', { detail: s })); })
-    .catch(() => { /* ignore */ });
+    .then((s) => {
+      // 仅当结果与缓存不同（或没有缓存）时二次派发，避免页面闪烁
+      if (!cached || JSON.stringify(cached.s) !== JSON.stringify(s)) {
+        applySettings(s);
+      }
+      try { sessionStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify({ t: Date.now(), s })); } catch { /* ignore */ }
+    })
+    .catch(() => { /* 离线/异常时沿用缓存 */ });
 })(window);

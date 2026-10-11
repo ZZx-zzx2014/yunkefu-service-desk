@@ -32,9 +32,9 @@
       'background:#fffbeb', 'border-top:1px solid #fde68a', 'color:#92400e',
       'font-size:12.5px', 'padding:8px 14px', 'text-align:center', 'line-height:1.6',
     ].join(';'));
-    bar.innerHTML = '⚠️ <strong>测试模式</strong>：仅供本机 / 局域网试用，'
+    bar.innerHTML = '⚠️ <strong>测试模式</strong>：仅供本机试用，'
       + '「一键体验」可免密码进入（含管理员）。'
-      + '请勿将本机端口映射到公网；对外服务请设置 <code>KEFU_TEST_MODE=0</code> 与 <code>KEFU_SECRET</code>。';
+      + '请勿将本机端口映射到公网；对外服务请直接 <code>npm start</code>（正常模式，需配置 <code>KEFU_SECRET</code>）。';
     document.body.appendChild(bar);
   }
 
