@@ -297,7 +297,11 @@ const DEPLOY_HOST_ALLOW = new Set(['github.com', 'codeload.github.com']);
         // URL 受 deploy.js 的 REPO_RE 严格白名单约束（见下方断言），
         // 不构成隐蔽外联（数据只出不进，且目标由管理员在界面上明确选择）。
         if (DEPLOY_HOST_ALLOW.has(host)) {
-          if (relFile !== 'server\\deploy.js' && relFile !== 'server/deploy.js') {
+          // 服务端：只允许出现在 deploy.js（唯一真正发起下载的地方）。
+          // 前端：允许作为输入框占位与说明文案出现 —— 浏览器侧不可能主动外联，
+          // 下方「前端 fetch 仅访问站内地址」断言与 CSP 的 connect-src 'self' 会单独把关。
+          const isFrontend = relFile.startsWith('public\\') || relFile.startsWith('public/');
+          if (!isFrontend && relFile !== 'server\\deploy.js' && relFile !== 'server/deploy.js') {
             outbound.push(`${relFile}: ${host}（部署主机只允许出现在 deploy.js）`);
           }
           return;

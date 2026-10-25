@@ -107,17 +107,29 @@ git push -u origin main
 中显式声明（键为 `文件名 方法 /路径`），否则自检会失败 —— 这是刻意设计，
 避免有人无意中把需要鉴权的接口暴露出去。
 
-## 七、暂缓上线的子系统
+## 七、站点托管子系统（已接入）
 
-**站点托管**（`server/routes/sites.js`、`server/php.js`、`server/deploy.js`）已实现但
-**未接入主服务**：`index.js` 中的挂载语句处于注释状态。原因：它曾因
-导入错误阻断服务启动（`audit` 误从 `middleware.js` 导入），暴露出新模块在
-接入主入口前缺少「启动冒烟」环节。重新接入的步骤：
+**站点托管**（`server/routes/sites.js`、`server/php.js`、`server/deploy.js`）已完成接入，
+由 `scripts/test-sites.js`（61 项）覆盖：权限边界、静态投递、独立端口、PHP 请求语义、
+沙箱隔离、静态站安全、GitHub 部署参数校验、清理。
 
-1. 取消 `index.js` 中两处 `sites` 相关注释（import 与挂载）
-2. `node --check server/routes/sites.js server/php.js server/deploy.js`
-3. `npm run testmode` 确认服务能启动、横幅正常
-4. 新增 `test-sites.js` 套件（创建/部署/删除/越权/路径逃逸/PHP 隔离）
-5. 通过后按上文流程提交
+接入时踩到的坑（保留记录，避免回退）：
 
-在完成第 4 步之前，请勿在对外环境接入该子系统。
+1. **必须挂在独立端口**（默认 `PORT + 1`）。托管内容来自外部，同源会让托管页 JS 读到
+   同源 `localStorage` 里的登录令牌并直接调用 `/api`。不同端口＝不同源。
+2. `server/index.js` 中 `app.use('/api/admin/sites', ...)` 必须写在
+   `app.use('/api/admin', ...)` **之前**，否则会被管理端自带的兜底路由吞掉。
+3. **不要用 `app.use('/:slug/*')` 反推相对路径**：Express 的 `use` 挂载会把通配段
+   从 `req.url` 一并剥掉，`req.path` 只剩 `/`，导致任何 URL 都退化成「根目录找 index」
+   ——表现为 `.php` 不执行、`.runtime/` 可访问、`%2e%2e` 穿越返回 200。现在访问端
+   自己从 `req.originalUrl` 解析路径。
+4. **PHP 的 `-d` 参数会被静默丢弃**：当 `QUERY_STRING` 里没有 `=` 时，php-cgi 会走
+   「把查询串当命令行参数再解析一遍」的分支，重建 ini 环境并丢弃全部 `-d`，
+   `open_basedir` / `disable_functions` 全部失效（等于沙箱消失）。现在 `runPhp`
+   会给无等号的查询串补一个空参数（`a` → `a&=`），语义不变。
+5. `open_basedir` 与脚本路径比较时不做短名展开，路径里若含 8.3 短名（如
+   `C:\ARDUIN~1`）会直接 404。现在统一先 `fs.realpathSync`。
+
+安全取舍：PHP 站点的 `disable_functions` 包含 `fopen / fwrite / file_put_contents /
+mkdir / unlink / rename` 等写函数，因此依赖写文件或安装向导的程序会失败。这是有意为之，
+需要写文件能力时请评估后自行放开。

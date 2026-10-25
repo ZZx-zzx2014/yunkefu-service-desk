@@ -180,9 +180,14 @@ export function parseCgiOutput(buf) {
       if (sm) status = Number(sm[1]);
       continue;
     }
-    if (key === 'content-type' || key === 'location' || key === 'set-cookie' || key === 'cache-control') {
-      headers[key] = val;
+    // Set-Cookie 允许重复，且不能合并成一行（合并后浏览器会当成一个 Cookie 解析错）
+    if (key === 'set-cookie') {
+      if (!Array.isArray(headers[key])) headers[key] = [];
+      headers[key].push(val);
+      continue;
     }
+    // 其余重复头按 HTTP 语义合并
+    headers[key] = headers[key] === undefined ? val : `${headers[key]}, ${val}`;
   }
   return { headers, status, body };
 }
@@ -198,11 +203,46 @@ export function parseCgiOutput(buf) {
  * @param {Buffer|string} [opts.body] 请求体
  */
 export async function runPhp({ bin, script, docRoot, cgi = {}, body = '' }) {
-  // 路径必须落在站点目录内（防 ../ 逃逸）
-  const resolved = path.resolve(script);
-  if (!resolved.toLowerCase().startsWith(path.resolve(docRoot).toLowerCase())) {
+  /* 为什么用 realpath：
+   * PHP 的 open_basedir 比较的是「未展开的 basedir 字符串」与「脚本的 realpath」。
+   * 只要 basedir 里出现 8.3 短名（如 C:\ARDUIN~1）或 junction/符号链接，
+   * 两者就不再相等，PHP 会直接返回 404 "No input file specified"。
+   * 两边都取 realpath 才能稳定匹配（已实测：短名温度目录 100% 失败）。
+   */
+  const realRoot = fs.realpathSync(path.resolve(docRoot));
+  const realScript = fs.realpathSync(path.resolve(script));
+
+  // 路径必须落在站点目录内（防 ../ 逃逸）——用真实路径比较，避免软链接绕过
+  const sep = process.platform === 'win32' ? '\\' : '/';
+  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  if (!norm(realScript).startsWith(norm(realRoot) + sep) && norm(realScript) !== norm(realRoot)) {
     throw new Error('PHP 脚本路径超出站点目录');
   }
+
+  /* 运行时目录放进站点目录内（.runtime），而不是系统 TEMP：
+   *   - open_basedir 只放一个根，规则最清晰，也不会因为 TEMP 的短名路径而失效
+   *   - 站点之间天然隔离，各自的 session / 上传临时文件互不可见
+   * .runtime 在访问端被拒绝（以 . 开头的路径段一律 403），不会暴露到公网。
+   */
+  const runtimeDir = path.join(realRoot, '.runtime');
+  const sessionDir = path.join(runtimeDir, 'sessions');
+  const tmpDir = path.join(runtimeDir, 'tmp');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  /* 关键安全修复：php-cgi 的「查询串当命令行」分支
+   * ------------------------------------------------------------
+   * php-cgi 在 QUERY_STRING 里**找不到 '='** 时，会把查询串当成命令行参数再解析一遍，
+   * 这一步会重建 ini 环境，导致我们通过 -d 注入的 open_basedir / disable_functions
+   * 全部被丢弃（实测：此时能读到站点外的 kefu.db、shell_exec 可用 = 沙箱被穿透）。
+   *
+   * 修法：查询串不含 '=' 时补一个「空名参数对」。PHP 的 query 解析器会忽略空名参数，
+   * 实测 $_GET 的数量与键名和原查询串完全一致（'' → '='、'a' → 'a&='、'a&b' → 'a&b&='），
+   * 唯一可见差异是 $_SERVER['QUERY_STRING'] 末尾多了 '&='，因此另外用 REQUEST_URI
+   * 暴露原始查询串，保证应用侧拿到的是「真实」URL。
+   */
+  const rawQuery = cgi.QUERY_STRING || '';
+  const queryEnv = rawQuery.includes('=') ? rawQuery : `${rawQuery}${rawQuery ? '&' : ''}=`;
 
   const env = {
     ...cgi,
@@ -211,34 +251,38 @@ export async function runPhp({ bin, script, docRoot, cgi = {}, body = '' }) {
     PHP_DISABLE_FUNCTIONS: '',                 // 占位避免误用，真正用 -d 注入
     REDIRECT_STATUS: '200',                    // cgi.force_redirect 配套
     // —— 标准 CGI 变量 ——
-    SCRIPT_FILENAME: resolved,
-    SCRIPT_NAME: cgi.SCRIPT_NAME || path.basename(resolved),
-    DOCUMENT_ROOT: path.resolve(docRoot),
+    SCRIPT_FILENAME: realScript,
+    SCRIPT_NAME: cgi.SCRIPT_NAME || path.basename(realScript),
+    DOCUMENT_ROOT: realRoot,
     GATEWAY_INTERFACE: 'CGI/1.1',
     SERVER_SOFTWARE: 'yunkefu',
     REQUEST_METHOD: cgi.REQUEST_METHOD || 'GET',
-    QUERY_STRING: cgi.QUERY_STRING || '',
+    QUERY_STRING: queryEnv,
+    REQUEST_URI: (cgi.SCRIPT_NAME || '/' + path.basename(realScript)) + (rawQuery ? `?${rawQuery}` : ''),
     CONTENT_TYPE: cgi.CONTENT_TYPE || (String(body).length ? 'application/x-www-form-urlencoded' : ''),
     CONTENT_LENGTH: String(Buffer.byteLength(body || '')),
   };
 
   const args = [
     // -d 强制注入，优先级高于 php.ini
-    '-d', `open_basedir=${path.resolve(docRoot)}${path.delimiter}${fs.realpathSync(process.env.TEMP || '/tmp')}`,
+    // open_basedir 只放站点真实根目录（详见上方 realpath 说明）
+    '-d', `open_basedir=${realRoot}`,
     '-d', `disable_functions=${DISABLED_FUNCTIONS}`,
     '-d', `disable_classes=${DISABLED_CLASSES}`,
     '-d', 'expose_php=Off',
     '-d', 'cgi.force_redirect=0',
     '-d', 'allow_url_include=0',
     '-d', 'allow_url_fopen=0',
-    '-d', 'session.save_path=' + (process.env.TEMP || '/tmp'),
+    '-d', `session.save_path=${sessionDir}`,
+    '-d', `upload_tmp_dir=${tmpDir}`,
+    '-d', `sys_temp_dir=${tmpDir}`,
     '-d', 'upload_max_filesize=2M',
     '-d', 'post_max_size=3M',
     '-d', 'memory_limit=128M',
     '-d', 'max_execution_time=15',
     '-d', 'display_errors=Off',
     '-d', 'log_errors=On',
-    '-d', 'error_log=' + path.join(process.env.TEMP || '/tmp', 'kefu-php-error.log'),
+    '-d', `error_log=${path.join(runtimeDir, 'php-error.log')}`,
   ];
 
   return new Promise((resolve, reject) => {

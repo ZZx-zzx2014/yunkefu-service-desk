@@ -23,6 +23,7 @@ const suites = [
   ['消息通知场景测试（回归）', 'test-notify.js'],
   ['新增功能专项测试（常用话术 / 文件库）', 'test-features.js'],
   ['提权与免密码登录安全测试', 'test-privilege.js'],
+  ['站点托管测试（静态 / PHP 沙箱 / 独立端口）', 'test-sites.js'],
   ['数据库自动迁移测试', 'test-migration.js'],
   ['看板指标合理性检查', 'check-metrics.js'],
   ['路径归一化单元测试', 'normalize-path.js'],

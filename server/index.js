@@ -7,7 +7,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 // 说明：.env 由 server/config.js 在其顶部载入（必须早于任何配置读取）
-import { PORT, HOST, PUBLIC_DIR, ROOT, ACCESS, LISTEN_ALL } from './config.js';
+import { PORT, HOST, SITES_PORT, PUBLIC_DIR, ROOT, ACCESS, LISTEN_ALL } from './config.js';
 import './db.js';
 import { getSettings } from './db.js';
 import { attachUser, errorHandler, ok, fail } from './middleware.js';
@@ -26,10 +26,7 @@ import ticketRoutes from './routes/tickets.js';
 import kbRoutes from './routes/kb.js';
 import dashboardRoutes from './routes/dashboard.js';
 import adminRoutes from './routes/admin.js';
-// 站点托管子系统暂缓挂载：sites.js 存在两处缺陷（audit 导入来源错误已修，
-// serveSiteFile 内引用未定义的 next），且未经完整验证。
-// 安排：单独修复并验证后，再取消注释接入。见 PUBLISHING.md 待办。
-// import siteAdminRoutes, { siteHostApp } from './routes/sites.js';
+import siteAdminRoutes, { siteHostApp } from './routes/sites.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -72,9 +69,10 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/kb', kbRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+// 站点托管的管理端接口必须挂在 /api/admin 之前：adminRoutes 内部有自己的错误处理，
+// 放在后面一旦命中其兜底就再也到不了这里。
+app.use('/api/admin/sites', siteAdminRoutes);
 app.use('/api/admin', adminRoutes);
-// 站点托管：管理端接口（暂缓挂载，见顶部说明）
-// app.use('/api/admin/sites', siteAdminRoutes);
 
 /* ------------------------------ 局域网接入 / 二维码 ------------------------------ */
 
@@ -126,8 +124,21 @@ app.get('/api/qr', (req, res) => {
 app.use('/api', (_req, res) => fail(res, '接口不存在', 404));
 
 /* ------------------------------ 站点托管（/s/<slug>/） ------------------------------ */
-// 访问端暂缓挂载（见顶部说明）：
-// app.use('/s', siteHostApp());
+/**
+ * 访问端跑在独立端口（SITES_PORT，默认 PORT+1），不与主系统同源。
+ * 为什么必须换源：托管内容是外部的（GitHub 仓库 / 管理员上传的 PHP），
+ * 同源时托管页的 JS 能直接读同源 localStorage（登录令牌就在里面）并调用同源 /api，
+ * 等于给外部代码开了一个后台入口。换端口＝换源，浏览器天然隔离 localStorage/cookie。
+ * 主端口这里只做 302 跳转，真正出内容的是下面的独立服务。
+ */
+app.get(/^\/s(\/.*)?$/, (req, res) => {
+  if (!SITES_PORT) {
+    return res.status(404).type('html').send(`<!DOCTYPE html><meta charset="UTF-8"><title>站点托管未启用</title>
+<body style="font-family:system-ui;text-align:center;padding:60px;color:#64748b">
+<h2 style="color:#0f172a">站点托管未启用</h2><p>管理员可在 .env 设置 KEFU_SITES_PORT 后重启服务。</p></body>`);
+  }
+  return res.redirect(302, `${req.protocol}://${req.hostname}:${SITES_PORT}${req.originalUrl}`);
+});
 
 /* ------------------------------ 静态资源 ------------------------------ */
 // 上传文件走专用中间件：强制 nosniff、非图片强制下载、禁止任何主动内容执行
@@ -186,6 +197,34 @@ app.use(errorHandler);
 /* ------------------------------ 启动 ------------------------------ */
 const server = http.createServer(app);
 initRealtime(server);
+
+/**
+ * 站点托管服务：独立端口 + 独立 express 实例。
+ * 与主系统共享的只有磁盘上的站点目录和数据库记录，Cookie / localStorage / 同源策略全部隔离。
+ */
+let sitesServer = null;
+function startSitesServer() {
+  if (!SITES_PORT) {
+    console.log('  · 站点托管：已关闭（KEFU_SITES_PORT=0）');
+    return;
+  }
+  const sitesApp = express();
+  sitesApp.disable('x-powered-by');
+  sitesApp.use(compress());
+  sitesApp.use('/s', siteHostApp());
+  sitesApp.use((_req, res) => res.status(404).type('html').send(`<!DOCTYPE html><meta charset="UTF-8"><title>404</title>
+<body style="font-family:system-ui;text-align:center;padding:60px;color:#64748b">
+<h2 style="color:#0f172a">404</h2><p>地址应以 /s/&lt;站点标识&gt;/ 开头。</p></body>`));
+  sitesApp.use(errorHandler);
+
+  sitesServer = http.createServer(sitesApp);
+  sitesServer.on('error', (err) => {
+    console.error(`  · ⚠️  站点托管启动失败（端口 ${SITES_PORT}）：${err.message}`);
+  });
+  sitesServer.listen(SITES_PORT, HOST, () => {
+    console.log(`  · 站点托管     http://localhost:${SITES_PORT}/s/<站点标识>/`);
+  });
+}
 
 /**
  * 按「显示宽度」截断/补齐（中日韩字符占 2 列），用于把启动横幅的边框对齐。
@@ -265,7 +304,8 @@ server.listen(PORT, HOST, () => {
      管理后台       http://localhost:${PORT}/admin
      帮助中心       http://localhost:${PORT}/help`);
 
-  // 站点托管子系统暂缓上线：/s/ 路由未挂载，提示一并隐藏（见 PUBLISHING.md 待办）
+  // 站点托管（独立端口，失败也不影响主服务）
+  startSitesServer();
 
   if (ACCESS.testMode) {
     console.log(`
@@ -324,6 +364,7 @@ if (process.env.KEFU_SHOW_QR === '1') {
 
 const shutdown = (signal) => {
   console.log(`\n[server] 收到 ${signal}，正在关闭…`);
+  try { if (sitesServer) sitesServer.close(); } catch { /* 忽略 */ }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000);
 };

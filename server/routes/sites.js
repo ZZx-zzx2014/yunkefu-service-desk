@@ -19,6 +19,7 @@ import { SITES_DIR } from '../config.js';
 import { run, get, all, audit } from '../db.js';
 import { nowStr } from '../utils.js';
 import { asyncHandler, ok, fail, requireAuth, requireRole } from '../middleware.js';
+import { securityHeaders } from '../security.js';
 import { listPhpVersions, runPhp } from '../php.js';
 import { deployFromGitHub, parseRepoUrl, validateRef, dirSize, removeDir, siteDirName } from '../deploy.js';
 
@@ -232,59 +233,85 @@ router.delete('/:id', requireAuth, adminOnly, asyncHandler(async (req, res) => {
  * B. 访问端：GET /s/:slug/* —— 供独立挂载，见 index.js
  * ================================================================== */
 
-/** 构造访问端中间件（挂到主 app，路径 /s/） */
+/** 构造访问端中间件（挂到独立端口，路径 /s/） */
 export function siteHostApp() {
   const app = express();
+  app.disable('x-powered-by');
 
-  // 站点解析：/s/<slug> 与 /s/<slug>/* 都命中（前者随后被重定向到带斜杠形式）
-  app.use('/:slug', (req, res, next) => {
-    const slug = req.params.slug;
+  /* PHP 需要「原始请求体」自己解析 $_POST / php://input。
+   * 不可以用 express.urlencoded —— 那会把 body 变成对象，PHP 就看不到原始字节了。
+   * 2MB 上限与 php.ini 的 post_max_size=3M 相互配合（网关先兜一层）。
+   */
+  app.use(express.raw({ type: () => true, limit: '2mb' }));
+  app.use(securityHeaders);
+
+  /* 站点解析与文件投递：单入口，自己从 originalUrl 里解析路径。
+   *
+   * 为什么不用 app.use('/:slug/*')：Express 的 use 挂载会把匹配到的
+   * 路径段从 req.url 里剥掉，`/:slug/*` 连通配部分一起剥，req.path 就只剩 '/'，
+   * 结果任何文件的请求都会退化成「根目录 → 找 index」——表现为所有 URL 都返回
+   * 首页（.php 不执行、.runtime 可访问、穿越探测也 200）。改成自己解析最可控。
+   */
+  app.use((req, res, next) => {
+    const raw = String(req.originalUrl || req.url || '');
+    const qIdx = raw.indexOf('?');
+    const rawPath = qIdx === -1 ? raw : raw.slice(0, qIdx);
+    const rawQuery = qIdx === -1 ? '' : raw.slice(qIdx);
+
+    let pathname;
+    try {
+      // 只解码一次：解码后才会暴露 %2e%2e / %00，随后由 safeResolve 统一拒绝
+      pathname = decodeURIComponent(rawPath);
+    } catch {
+      return res.status(400).type('text/plain; charset=utf-8').send('非法 URL 编码');
+    }
+
+    // 去掉挂载前缀 /s（直接挂在 / 时不存在这一段，正则兼容两种情况）
+    const rest = pathname.replace(/^\/s(?=\/|$)/, '');
+    const m = rest.match(/^\/([A-Za-z0-9-]+)(\/[\s\S]*)?$/);
+    if (!m) {
+      return res.status(404).type('html').send(notFoundPage('404', '地址应以 /s/<站点标识>/ 开头。'));
+    }
+
+    const slug = m[1];
+    const subPath = m[2] || '';          // '' 或 '/xxx/yyy'
     const site = get('SELECT * FROM sites WHERE slug = ? AND status = ?', [slug, 'running']);
     if (!site) {
-      return res.status(404).send(`<!DOCTYPE html><meta charset="UTF-8"><title>404</title><body style="font-family:system-ui;text-align:center;padding:60px;color:#64748b"><h2 style="color:#0f172a">站点不存在或已停止</h2><p>请检查地址，或联系管理员。</p></body>`);
+      return res.status(404).type('html').send(notFoundPage('站点不存在或已停止', '请检查地址，或联系管理员。'));
     }
+
     req.site = site;
     req.siteRoot = siteRoot(site);
-    next();
-  });
 
-  // 无尾斜杠的 /s/<slug> → 301 到 /s/<slug>/（统一入口，命中下方通配）
-  app.use('/:slug', (req, res, next) => {
-    if (req.method !== 'GET' || req.path.split('/').length > 2) return next();
-    return res.redirect(301, `${req.baseUrl}/${req.params.slug}/`);
-  });
-
-  // 静态/PHP 统一入口
-  app.use('/:slug/*', (req, res, next) => {
-    const root = req.siteRoot;
-    // 解码 URL 中的相对路径（Express 已解码 req.path）
-    const rel = req.path.replace(/^\/[^/]+\//, '');   // 去掉 /<slug>/ 前缀
-    const target = safeResolve(root, rel);
-
-    if (!target) return res.status(403).send('Forbidden');
-
-    // 目录访问：自动找 index
-    let stat;
-    try { stat = fs.statSync(target); } catch {
-      return res.status(404).send(`<!DOCTYPE html><meta charset="UTF-8"><title>404</title><body style="font-family:system-ui;text-align:center;padding:60px;color:#64748b"><h2 style="color:#0f172a">404</h2><p>文件不存在。</p></body>`);
+    // /s/<slug> → /s/<slug>/（保留查询串）
+    if (subPath === '') {
+      return res.redirect(301, `/s/${slug}/${rawQuery}`);
     }
 
-    // serveSiteFile 是 async：捕获其异常，防止未处理 rejection
+    const target = safeResolve(req.siteRoot, subPath.replace(/^\/+/, ''));
+    if (!target) return res.status(403).type('text/plain; charset=utf-8').send('Forbidden');
+
     const finish = (err) => {
-      if (err && !res.headersSent) {
-        console.error(`[site:${req.site?.slug}] 处理失败:`, err.message);
-        return res.status(500).send('处理请求失败');
-      }
-      if (err) console.error(`[site:${req.site?.slug}] 处理失败:`, err.message);
+      if (!err) return;
+      console.error(`[site:${slug}] 处理失败:`, err.message);
+      if (!res.headersSent) res.status(500).type('text/plain; charset=utf-8').send('处理请求失败');
     };
 
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).type('html').send(notFoundPage('404', '文件不存在。'));
+    }
+
     if (stat.isDirectory()) {
+      // 目录且没有尾斜杠：先补斜杠，保证页面里的相对链接正确
+      if (!pathname.endsWith('/')) return res.redirect(301, `/s/${slug}${subPath}/${rawQuery}`);
       for (const idx of ['index.php', 'index.html', 'index.htm']) {
         const idxPath = path.join(target, idx);
         try {
-          fs.accessSync(idxPath, fs.constants.R_OK);
-          return serveSiteFile(req, res, idxPath).catch(finish);
-        } catch { /* 继续找 */ }
+          if (fs.statSync(idxPath).isFile()) return serveSiteFile(req, res, idxPath).catch(finish);
+        } catch { /* 继续找下一个候选 */ }
       }
       return sendDirListing(req, res, target);
     }
@@ -307,62 +334,67 @@ export function siteHostApp() {
         return res.status(500).send(`服务器配置错误：找不到 PHP ${site.php_version}`);
       }
       try {
+        /* 用原始 URL 里的查询串，不要用 req.query 重新序列化：
+         * 重新序列化会丢掉「?keyword」这种无等号形式、丢失重复键与顺序，
+         * 而 runPhp 内部正是靠查询串原样传递来避免 php-cgi 的「查询串当命令行」分支。
+         */
+        const rawQuery = String(req.originalUrl || '').split('?')[1] || '';
+        const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
         const out = await runPhp({
           bin: v.bin,
           script: filePath,
           docRoot: root,
           cgi: {
             REQUEST_METHOD: req.method,
-            QUERY_STRING: req.query ? new URLSearchParams(req.query).toString() : '',
+            QUERY_STRING: rawQuery,
             CONTENT_TYPE: req.headers['content-type'] || '',
-            REQUEST_URI: req.url,
-            PATH_INFO: '',
+            SCRIPT_NAME: '/' + path.basename(filePath),
+            REQUEST_URI: req.originalUrl,
             HTTP_HOST: req.headers.host || '',
             HTTPS: req.secure ? 'on' : '',
             REMOTE_ADDR: req.ip || '',
             HTTP_USER_AGENT: req.headers['user-agent'] || '',
             HTTP_ACCEPT: req.headers.accept || '',
+            HTTP_ACCEPT_LANGUAGE: req.headers['accept-language'] || '',
+            HTTP_COOKIE: req.headers.cookie || '',
+            HTTP_REFERER: req.headers.referer || '',
           },
-          body: ['GET', 'HEAD'].includes(req.method) ? '' : JSON.stringify(req.body || {}),
+          body: ['GET', 'HEAD'].includes(req.method) ? '' : rawBody,
         });
-        if (out.headers.location) res.setHeader('Location', out.headers.location);
-        if (out.headers['content-type']) res.setHeader('Content-Type', out.headers['content-type']);
-        if (out.headers['set-cookie']) res.setHeader('Set-Cookie', out.headers['set-cookie']);
-        return res.status(out.status).send(out.body);
+
+        // 把 PHP 输出的响应头尽量忠实转发（多值头用数组形式）
+        for (const [k, val] of Object.entries(out.headers || {})) {
+          const lower = k.toLowerCase();
+          if (['status', 'content-length', 'transfer-encoding', 'connection'].includes(lower)) continue;
+          if (lower === 'x-powered-by') continue;   // 不暴露 PHP 版本
+          try { res.setHeader(k, val); } catch { /* 非法头忽略 */ }
+        }
+        res.status(out.status);
+        // HEAD 只要头，不要体
+        return req.method === 'HEAD' ? res.end() : res.send(out.body);
       } catch (err) {
         console.error(`[site:${site.slug}] PHP 执行失败:`, err.message);
         return res.status(500).send(`PHP 执行失败：${escapeHtml(err.message)}`);
       }
     }
 
-    // 静态文件：用 fs.createReadStream 直接投递（简单、可靠，保留协商能力）
-    // —— 不再复用 express.static（它对 req.url 的重写要求与挂载路径耦合，容易踩坑）
-    let data;
-    try {
-      data = fs.readFileSync(filePath);
-    } catch {
-      return res.status(500).send('读取文件失败');
-    }
-    const rel = path.relative(root, filePath);
+    // 静态文件：交给 res.sendFile 流式投递（支持 Range/ETag/Last-Modified，
+    // 大文件不会整体读进内存，比 readFileSync 更稳）
+    const rel = path.relative(root, filePath).split(path.sep).join('/');
     const ext = path.extname(filePath).toLowerCase();
-    const MIME = {
-      '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
-      '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
-      '.json': 'application/json; charset=utf-8',
-      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-      '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8',
-      '.pdf': 'application/pdf', '.woff': 'font/woff', '.woff2': 'font/woff2',
-      '.mp4': 'video/mp4', '.webm': 'video/webm',
-    };
-    res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', /\.(html?|js|css)$/i.test(rel) ? 'no-cache, must-revalidate' : 'public, max-age=3600');
-    // 危险类型强制下载（与主系统 /uploads 同策略）
-    if (['.exe', '.dll', '.bat', '.cmd', '.sh', '.msi', '.jar'].includes(ext)) {
+    res.setHeader('Cache-Control', /\.(html?|js|css|json)$/i.test(rel)
+      ? 'no-cache, must-revalidate'
+      : 'public, max-age=3600');
+    // 危险类型强制下载（与主系统 /uploads 同策略），避免站点里放的 exe 被浏览器直接执行
+    if (DANGEROUS_EXT.includes(ext)) {
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(path.basename(filePath))}"`);
     }
-    return res.send(data);
+    return res.sendFile(filePath, { dotfiles: 'deny' }, (err) => {
+      if (!err || res.headersSent) return;
+      const code = err.code === 'ENOENT' ? 404 : (err.status || 500);
+      res.status(code).send(code === 404 ? '文件不存在' : '读取文件失败');
+    });
   }
 
   /** 简单目录列表（无 index 时） */
@@ -388,16 +420,36 @@ export function siteHostApp() {
 
 /* ---------------- 工具 ---------------- */
 
-/** 路径解析：结果必须仍在 root 内，且拒绝隐藏文件与点开头文件 */
+/** 路径解析：结果必须仍在 root 内，且拒绝隐藏文件与点开头路径 */
 function safeResolve(root, rel) {
   const clean = String(rel || '').replace(/^\/+/, '');
   if (clean.includes('\0') || clean.includes('..')) return null;
-  if (/(^|\/)\.git(\/|$)/i.test(clean)) return null; // 不暴露 .git
+  // 编码后的穿越尝试（%2e%2e / %00）也一并拒绝
+  if (/%2e|%00|%5c/i.test(clean)) return null;
+  // 任何以点开头的路径段都不对外暴露：.git / .env / .runtime（PHP 会话与日志都在这里）
+  // 例外：.well-known 是 Let's Encrypt 等标准约定的公开目录
+  const segs = clean.split('/').filter(Boolean);
+  for (const s of segs) {
+    if (s.startsWith('.') && s !== '.well-known') return null;
+  }
   const target = path.resolve(root, clean);
   const rootRes = path.resolve(root);
   if (!target.toLowerCase().startsWith(rootRes.toLowerCase() + path.sep)
     && target.toLowerCase() !== rootRes.toLowerCase()) return null;
   return target;
+}
+
+/** 站点内允许访问但强制下载的扩展名 */
+const DANGEROUS_EXT = ['.exe', '.dll', '.bat', '.cmd', '.ps1', '.sh', '.msi', '.jar', '.com', '.scr', '.vbs', '.reg'];
+
+/** 站点侧的错误页（很轻，不依赖主系统的样式） */
+function notFoundPage(title, message) {
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
+<style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f8fafc;color:#64748b;
+text-align:center;padding:72px 24px;margin:0}h2{color:#0f172a;font-size:20px;margin:0 0 10px}
+p{font-size:14px;margin:0}</style></head>
+<body><h2>${escapeHtml(title)}</h2><p>${message}</p></body></html>`;
 }
 
 const HTML_ESCAPES = {

@@ -37,6 +37,22 @@ fs.mkdirSync(SITES_DIR, { recursive: true });
 export const PORT = Number(process.env.PORT || 3000);
 
 /* ------------------------------------------------------------------ *
+ * 站点托管（静态站点 / PHP 站点）的独立端口
+ *
+ * 为什么不用主端口的 /s/ 路径：托管内容来自外部（GitHub 仓库、管理员上传的
+ * PHP 代码），与客服系统同源会带来两个真实风险：
+ *   1. 托管页面里的 JS 可以读取同源 localStorage —— 而登录令牌就存在那里，
+ *      等于任何站点都能偷走管理员令牌；
+ *   2. 托管站点可调用同源 /api 接口，绕过了本系统的 CSRF/来源隔离假设。
+ * 用不同端口 = 不同源，浏览器天然隔离 localStorage / cookie / 同源策略。
+ * 端口可自定义：KEFU_SITES_PORT；设为 0 表示关闭站点托管。
+ * ------------------------------------------------------------------ */
+const rawSitesPort = String(process.env.KEFU_SITES_PORT ?? '').trim();
+export const SITES_PORT = rawSitesPort === ''
+  ? PORT + 1
+  : (Number(rawSitesPort) || 0);
+
+/* ------------------------------------------------------------------ *
  * 运行模式
  *
  * 默认「正常模式」（对外服务模式）。测试模式需要显式进入：

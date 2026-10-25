@@ -67,6 +67,8 @@ async function startInstance({ port, testMode, secret }) {
     KEFU_TEST_MODE: testMode ? '1' : '0',
     KEFU_SECRET: secret,
     HOST: '127.0.0.1',
+    // 独立实例不测站点托管：默认站点端口是 PORT+1，会与本套件的另一个实例撞端口
+    KEFU_SITES_PORT: '0',
   };
   const child = spawn(process.execPath, [ENTRY], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let booted = false;

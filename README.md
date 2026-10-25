@@ -286,6 +286,7 @@ GET /api/lan                     # JSON：所有可访问地址与推荐地址
 - 客户管理：客户档案与活跃度
 - 部门管理：组织架构、成员统计、在线人数
 - 系统设置：站点名称、欢迎语、排队提示、自动分配、自动关闭、SLA 基准、评价开关
+- 站点托管：静态站点与 PHP 站点、从 GitHub 仓库一键部署、部署历史、打开/删除
 - 操作日志：全量审计记录（操作人、动作、对象、详情、IP）
 - 通知广播：向在线或全体坐席推送系统通知
 
@@ -441,6 +442,35 @@ POST /api/auth/2fa/verify   { twoFactorToken, code }
 > 而是让**落盘扩展名完全由服务端根据校验后的类型决定**——即使某个危险类型没被列举到，
 > 它也无法以脚本扩展名落盘。
 
+### 站点托管（静态 / PHP / GitHub 部署）
+
+管理后台的「站点托管」页可以把整个目录当作站点发布出去（`/s/<slug>/`），支持三种来源：
+手建空站点、上传文件到 `data/sites/<slug>-<随机>/`、以及**从 GitHub 仓库一键部署**
+（`https://github.com/owner/repo` + 分支/标签 + 可选子目录）。
+
+关键设计：
+
+| 要点 | 做法 |
+| --- | --- |
+| **独立端口** | 默认 `PORT + 1`（`KEFU_SITES_PORT`，设 0 关闭）。托管内容来自外部，**同源**会让托管页 JS 读到同源 `localStorage`（登录令牌就在那）并直接调 `/api`；不同端口＝不同源，浏览器同源策略天然隔离 |
+| **路径隔离** | 站点固定在 `/s/<slug>/` 前缀下，slug 全局唯一；磁盘目录名带随机后缀（`slug-<rand>`），猜 slug 也定位不到目录 |
+| **目录穿越防护** | 相对路径拒绝 `..`、`\0`、`%2e/%00/%5c`；**任何以点开头的路径段一律拒绝**（保护 `.git`/`.env`/`.runtime`，仅放行 `.well-known`） |
+| **危险文件** | `.exe/.dll/.bat/.cmd/.ps1/.sh/.msi/.jar/.com/.scr/.vbs/.reg` 一律 `Content-Disposition: attachment` |
+| **PHP 沙箱** | `php-cgi` 以 `open_basedir` 锁在站点目录内；禁用 `exec/shell_exec/system/passthru/popen/proc_open/fopen/file_put_contents/move_uploaded_file/ini_set/putenv/chmod` 等；`allow_url_fopen`/`allow_url_include` 关闭；`memory_limit=128M`、`max_execution_time=15` |
+| **静态站不执行 PHP** | 静态类型站点请求 `.php` 直接 403 且不泄露源码 |
+| **原子部署** | 先下载解开到 `<dir>.staging`，成功后 `rename` 切换，失败保留原版本并记录 `last_error` + 部署记录 |
+
+PHP 站点的两个细节（都踩过坑，注释里写清了原理）：
+
+1. **`open_basedir` 与脚本路径的比较不做短名展开**——路径里含 8.3 短名（如 `C:\ARDUIN~1`）会直接返回
+   `No input file specified.`，所以统一先 `fs.realpathSync`。
+2. **`QUERY_STRING` 里没有 `=` 时，php-cgi 会重建 ini 环境并丢弃全部 `-d` 参数**（等于沙箱失效）。
+   现在给无等号的查询串补一个空参数（`a` → `a&=`）：PHP 忽略空名参数，`$_GET` 语义不变，
+   唯一可见差异是 `$_SERVER['QUERY_STRING']` 末尾多一个 `&=`。
+
+> 取舍：`disable_functions` 里包含写文件函数，因此需要写文件或安装向导的程序（部分 CMS）会运行失败。
+> 这是有意的安全默认值，确认风险后可自行放开。
+
 ### 静态资源缓存
 页面、脚本与样式表使用**协商缓存**（`Cache-Control: no-cache, must-revalidate` + ETag），
 浏览器每次都会发请求校验，仅在内容未变时复用本地副本。
@@ -562,6 +592,20 @@ POST /api/auth/2fa/verify   { twoFactorToken, code }
 | POST | `/notifications/read` | 标记已读 |
 | POST | `/broadcast` | 全员 / 在线坐席广播 |
 
+### 站点托管 `/api/admin/sites`（仅管理员）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/php-versions` | 本机可用的 PHP 版本列表 |
+| GET | `/` | 站点列表（含入口文件探测、体积、状态） |
+| POST | `/` | 创建站点 `{slug, name, type: static\|php, php_version}` |
+| PUT | `/:id` | 改名 / 切换 PHP 版本 |
+| DELETE | `/:id` | 删除站点及其磁盘目录 |
+| POST | `/:id/deploy` | 从 GitHub 部署 `{repo_url, repo_ref, sub_dir}` |
+| GET | `/:id/deploys` | 最近 20 条部署记录 |
+
+访问端：`/s/<slug>/`（主端口命中后 302 跳到站点端口，同一路径可直接打开）。
+
 ---
 
 ## 七、项目结构
@@ -582,6 +626,13 @@ kefu/
 │   ├── middleware.js            # 鉴权、角色校验、统一响应与错误处理
 │   ├── utils.js                 # 编号生成、分页、时间基准、限流
 │   ├── realtime.js              # WebSocket 网关、自动分配引擎、定时任务
+│   ├── compress.js              # 零依赖 gzip/deflate 响应压缩
+│   ├── qrcode.js                # 零依赖二维码编码（PNG/SVG/终端字符）
+│   ├── netinfo.js               # 本机可访问地址探测（局域网优先）
+│   ├── lanpage.js               # /lan 扫码接入页
+│   ├── php.js                   # PHP-CGI 隔离执行器（open_basedir 沙箱）
+│   ├── deploy.js                # GitHub tarball 下载与安全解包
+│   ├── env.js                   # 零依赖 .env 加载
 │   ├── seed.js                  # 演示数据初始化 / 重置
 │   └── routes/
 │       ├── auth.js              # 认证
@@ -589,6 +640,7 @@ kefu/
 │       ├── tickets.js           # 工单
 │       ├── kb.js                # 知识库
 │       ├── dashboard.js         # 数据看板
+│       ├── sites.js             # 站点托管（管理端 + 访问端）
 │       └── admin.js             # 管理后台
 ├── public/
 │   ├── index.html               # 客户咨询中心（由 / 提供服务）
@@ -609,8 +661,9 @@ kefu/
     ├── test-realtime.js         # 实时通信测试（26 项）
     ├── test-notify.js           # 客户消息通知场景回归（4 个场景）
     ├── test-features.js         # 常用话术与文件库测试（23 项）
+    ├── test-sites.js            # 站点托管测试（61 项）
     ├── test-migration.js        # 数据库自动迁移测试（11 项）
-    ├── check-layout.js          # 布局滚动约束检查（33 项）
+    ├── check-layout.js          # 布局滚动约束检查（45 项）
     ├── check-metrics.js         # 看板指标合理性检查
     ├── check-consistency.js     # 前后端一致性与 CSP 兼容性检查
     └── normalize-path.js        # 路径归一化单元测试
@@ -633,6 +686,8 @@ kefu/
 | `settings` | 系统设置（键值） |
 | `audit_logs` | 操作审计日志 |
 | `notifications` | 站内通知 |
+| `sites` | 托管站点（slug、类型、PHP 版本、磁盘目录、来源、状态、体积） |
+| `site_deploys` | 站点部署记录（来源、版本、结果、耗时、详情） |
 
 时间统一以 **本地时间字符串** 存储，与 SQLite 的 `datetime('now','localtime')` 保持同一基准，
 避免 UTC 与本地时间混用导致时长类指标出现负值。
@@ -650,7 +705,7 @@ kefu/
 
 ```bash
 npm start          # 先启动服务（另一个终端）
-npm test           # 运行全部 14 个测试套件
+npm test           # 运行全部 16 个测试套件
 npm run check:security   # 单独跑开源安全自检
 ```
 
@@ -668,6 +723,7 @@ npm run test:api           # 接口端到端（认证、会话、工单、知识
 npm run test:realtime      # WebSocket 实时推送与知识库同步
 npm run test:notify        # 客户消息通知场景（回归测试）
 npm run test:features      # 常用话术收藏 + 会话文件库
+npm run test:sites         # 站点托管（静态投递 / PHP 沙箱 / 独立端口 / 部署校验）
 npm run test:migration     # 旧数据库字段自动补齐
 npm run test:metrics       # 看板指标无负值 / 不越界
 ```
@@ -685,6 +741,7 @@ npm run test:metrics       # 看板指标无负值 / 不越界
 - **消息通知回归（4 个场景）**：客服已打开会话、客服未打开会话、会话排队中连发消息、客户先发消息客服后登录 —— 确保任何情况下坐席都能实时感知客户消息
 - **新增功能测试（23 项）**：常用话术收藏/取消/置顶排序/管理端操作/越权拦截、文件库空态、图片与文档识别、统计口径、文件名与大小、一键重发、重复文件合并计数、客户与坐席可见性、跨客户越权拦截、附件 URL 可达
 - **迁移测试（11 项）**：旧库自动补列、数据不丢失、常用标记自动初始化、幂等性
+- **站点托管（61 项）**：权限边界（未登录/客服/客户）、slug 与类型校验、独立端口跳转、静态投递与缓存头、PHP 请求语义（`$_GET`/Cookie/响应头/POST 表单/无等号查询串）、**沙箱隔离（越权读写 12 个危险函数全部被禁）**、静态站安全（穿越、隐藏目录、危险扩展名、不执行 PHP）、GitHub 部署参数校验、清理与幂等
 - **一致性检查**：浏览器脚本语法、服务端模块加载、68+75+84 个 DOM 引用、75 个前端接口调用与后端路由比对、24 个关键 CSS 类、绩效字段命名、**严格 CSP 兼容性（无内联脚本/事件/javascript: 链接）**、路由注册顺序
 
 > 接口契约测试是为一类特定事故加的：早期把 `quick-replies/list` 的返回从**数组**改成
@@ -717,6 +774,10 @@ npm run test:metrics       # 看板指标无负值 / 不越界
 | `KEFU_2FA_ADMIN_RATE_LIMIT` | `10` | 关闭 2FA / 重置备份码的尝试上限 |
 | `KEFU_WS_DEBUG` | 关闭 | 设为 `1` 输出 WebSocket 连接与在线状态日志 |
 | `KEFU_SHOW_QR` | 关闭 | 设为 `1` 启动时在终端打印可扫描二维码 |
+| `KEFU_SITES_PORT` | `PORT + 1`（`3001`） | 站点托管端口。**设 `0` 关闭整个站点托管**；与主站不同源是刻意的安全设计 |
+| `KEFU_SITES_DIR` | `data/sites` | 托管站点的文件根目录 |
+| `KEFU_PHP_TIMEOUT_MS` | `10000` | 单个 PHP 请求的执行超时 |
+| `KEFU_PHP_MAX_OUTPUT` | `8388608` | PHP 响应体上限（8 MB） |
 
 ```bash
 # macOS / Linux

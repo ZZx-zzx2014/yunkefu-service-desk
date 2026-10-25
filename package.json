@@ -41,6 +41,7 @@
     "test:notify": "node scripts/test-notify.js",
     "test:features": "node scripts/test-features.js",
     "test:privilege": "node scripts/test-privilege.js",
+    "test:sites": "node scripts/test-sites.js",
     "test:migration": "node scripts/test-migration.js",
     "test:qr": "node scripts/test-qr.js",
     "test:metrics": "node scripts/check-metrics.js",

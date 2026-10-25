@@ -117,7 +117,8 @@ console.log('\n\x1b[36m3. 前端调用的接口是否在后端定义\x1b[0m');
 const serverRoutes = new Set();
 const mounts = {
   '/api/auth': 'auth.js', '/api/conversations': 'conversations.js', '/api/tickets': 'tickets.js',
-  '/api/kb': 'kb.js', '/api/dashboard': 'dashboard.js', '/api/admin': 'admin.js',
+  '/api/kb': 'kb.js', '/api/dashboard': 'dashboard.js', '/api/admin/sites': 'sites.js',
+  '/api/admin': 'admin.js',
 };
 for (const [prefix, file] of Object.entries(mounts)) {
   const src = read(path.join(SERVER, 'routes', file));
@@ -265,6 +266,19 @@ console.log('\n\x1b[36m5b. 路由注册顺序与局域网模块\x1b[0m');
   const deps = Object.keys(pkg.dependencies || {});
   report(deps.length <= 3 && !deps.includes('qrcode'),
     '未引入二维码等额外依赖（保持零多余依赖）', `依赖：${deps.join(', ')}`);
+
+  /* ---------------- 站点托管子系统 ---------------- */
+  // /api/admin/sites 必须挂在 /api/admin 之前：admin.js 里自己带兜底路由
+  const sitesMountIdx = codeOnly.indexOf("app.use('/api/admin/sites'");
+  const adminMountIdx = codeOnly.indexOf("app.use('/api/admin',");
+  report(sitesMountIdx > -1 && adminMountIdx > -1 && sitesMountIdx < adminMountIdx,
+    '/api/admin/sites 注册在 /api/admin 之前（避免被管理端兜底吞掉）',
+    `sites@${sitesMountIdx} admin@${adminMountIdx}`);
+
+  // /s 跳转必须早于 404 兜底
+  const sitesRedirectIdx = codeOnly.indexOf('app.get(/^\\/s');
+  report(sitesRedirectIdx > -1 && sitesRedirectIdx < notFoundIdx,
+    '/s 站点跳转路由注册在 404 兜底之前', `s@${sitesRedirectIdx} notFound@${notFoundIdx}`);
 }
 
 /* ---------------- 6. 字段一致性 ---------------- */

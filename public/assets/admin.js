@@ -17,6 +17,7 @@
     '/customers': ['客户管理', '客户档案与活跃度'],
     '/departments': ['部门管理', '组织架构与人员归属'],
     '/settings': ['系统设置', '站点信息与服务规则'],
+    '/sites': ['站点托管', '静态站点与 PHP 站点托管'],
     '/logs': ['操作日志', '系统操作审计记录'],
   };
 
@@ -150,6 +151,7 @@
     '/customers': viewCustomers,
     '/departments': viewDepartments,
     '/settings': viewSettings,
+    '/sites': viewSites,
     '/logs': viewLogs,
   };
 
@@ -1331,6 +1333,240 @@
       toast('已保存', 'success');
       viewDepartments();
     } catch (err) { toast(err.message, 'error'); }
+  }
+
+  /* ============================== 站点托管 ============================== */
+
+  const SITE_STATUS = {
+    running: ['运行中', 'badge--success'],
+    error: ['部署失败', 'badge--danger'],
+    pending: ['处理中', 'badge--warning'],
+  };
+
+  async function viewSites() {
+    $('#view').innerHTML = '<div class="page"><div class="loading-block"><span class="spinner spinner--lg"></span><span>正在读取站点…</span></div></div>';
+
+    let sites = [];
+    let php = { list: [], available: false };
+    try {
+      const [data, versions] = await Promise.all([
+        api.get('/api/admin/sites'),
+        api.get('/api/admin/sites/php-versions').catch(() => ({ list: [], available: false })),
+      ]);
+      sites = data.list || [];
+      php = versions || php;
+    } catch (err) {
+      $('#view').innerHTML = `<div class="page">${emptyState('😥', '加载失败', err.message)}</div>`;
+      return;
+    }
+
+    const rowHtml = (s) => {
+      const [label, variant] = SITE_STATUS[s.status] || [s.status || '未知', 'badge--gray'];
+      const index = s.has_index
+        ? `<span class="text-xs text-muted">${escapeHtml(s.has_index.file)}</span>`
+        : '<span class="text-xs" style="color:var(--danger)">缺入口文件</span>';
+      return `
+        <tr>
+          <td>
+            <div class="fw-600">${escapeHtml(s.name)}</div>
+            <div class="text-xs text-muted">/s/${escapeHtml(s.slug)}/ · ${escapeHtml(s.created_at || '')}</div>
+          </td>
+          <td>
+            <span class="badge ${s.type === 'php' ? 'badge--info' : 'badge--gray'}">${s.type === 'php' ? 'PHP' : '静态'}</span>
+            <div class="text-xs text-muted mt-4">${s.type === 'php' ? escapeHtml(s.php_version || '-') : '—'}</div>
+          </td>
+          <td>
+            <span class="badge ${variant}">${escapeHtml(label)}</span>
+            ${s.source === 'github' ? '<div class="text-xs text-muted mt-4">GitHub 部署</div>' : ''}
+            ${s.last_error ? `<div class="text-xs mt-4" style="color:var(--danger);max-width:220px">${escapeHtml(String(s.last_error).slice(0, 120))}</div>` : ''}
+          </td>
+          <td class="text-sm text-muted">${index}<div class="text-xs mt-4">${fmt.bytes(s.size_bytes)}</div></td>
+          <td>
+            <div class="flex gap-8 flex-wrap">
+              <a class="btn btn--sm" href="${escapeHtml(s.url)}" target="_blank" rel="noopener">打开</a>
+              <button class="btn btn--sm" data-deploy="${s.id}">部署</button>
+              <button class="btn btn--sm" data-edit="${s.id}">设置</button>
+              <button class="btn btn--sm" data-history="${s.id}">记录</button>
+              <button class="btn btn--sm btn--danger" data-del="${s.id}">删除</button>
+            </div>
+          </td>
+        </tr>`;
+    };
+
+    $('#view').innerHTML = `
+      <div class="page">
+        <div class="flex items-center mb-20">
+          <div class="flex-1">
+            <div class="text-lg fw-600">站点托管（${sites.length}）</div>
+            <div class="text-sm text-muted mt-4">静态站点与 PHP 站点独立端口运行，与客服系统不同源；PHP 在 open_basedir 沙箱内执行</div>
+          </div>
+          <button class="btn btn--primary" id="btnNewSite">＋ 新建站点</button>
+        </div>
+
+        ${php.available ? '' : `
+          <div class="card mb-16" style="border-color:#fcd34d;background:#fffbeb">
+            <div class="fw-600 mb-6" style="color:#92400e">未检测到本机 PHP</div>
+            <div class="text-sm" style="color:#92400e">静态站点可以正常使用；PHP 站点需要先把 <code>php-cgi</code> 放到 PATH 或配置 <code>KEFU_PHP_DIR</code>，然后重启服务。</div>
+          </div>`}
+
+        ${sites.length === 0 ? emptyState('🗂️', '还没有站点', '点击右上角「新建站点」，可以从 GitHub 仓库直接部署，也可以创建空站点后自行放入文件。') : `
+          <div class="card">
+            <div class="table-wrap">
+              <table class="table">
+                <thead><tr><th>站点</th><th>类型</th><th>状态</th><th>入口 / 体积</th><th style="width:280px">操作</th></tr></thead>
+                <tbody>${sites.map(rowHtml).join('')}</tbody>
+              </table>
+            </div>
+          </div>`}
+
+        <div class="text-xs text-muted mt-16">
+          提示：PHP 站点已禁用 <code>exec / shell_exec / system / popen / fopen / file_put_contents</code> 等危险函数，
+          因此依赖写文件或调用外部命令的程序（部分 CMS、安装向导）会运行失败，这是有意的安全取舍。
+        </div>
+      </div>`;
+
+    $('#btnNewSite').onclick = () => siteForm(null, php);
+    $('#view').onclick = async (e) => {
+      const pick = (attr) => {
+        const t = e.target.closest(`[${attr}]`);
+        return t ? sites.find((s) => String(s.id) === t.getAttribute(attr)) : null;
+      };
+
+      const edit = pick('data-edit');
+      if (edit) { siteForm(edit, php); return; }
+
+      const deploy = pick('data-deploy');
+      if (deploy) { deployForm(deploy); return; }
+
+      const history = pick('data-history');
+      if (history) { openDeployHistory(history); return; }
+
+      const del = pick('data-del');
+      if (del) {
+        if (!await confirm({
+          title: '删除站点',
+          message: `确定删除「${del.name}」吗？站点目录与全部文件会一并删除，且不可恢复。`,
+          confirmText: '删除',
+          danger: true,
+        })) return;
+        try {
+          await api.del(`/api/admin/sites/${del.id}`);
+          toast('站点已删除', 'success');
+          viewSites();
+        } catch (err) { toast(err.message, 'error'); }
+      }
+    };
+  }
+
+  async function siteForm(site, php) {
+    const isNew = !site;
+    const versions = (php && php.list) || [];
+    const data = await formModal({
+      title: isNew ? '新建站点' : `站点设置：${site.name}`,
+      submitText: isNew ? '创建' : '保存',
+      fields: isNew ? [
+        { name: 'slug', label: '站点标识', required: true, placeholder: '例如：blog（小写字母/数字/连字符，3~30 位）', hint: '访问地址为 /s/<标识>/，创建后不可修改' },
+        { name: 'name', label: '站点名称', required: true, placeholder: '例如：产品文档' },
+        {
+          name: 'type',
+          label: '站点类型',
+          type: 'select',
+          value: 'static',
+          options: [{ value: 'static', label: '静态站点（HTML/CSS/JS）' }, { value: 'php', label: 'PHP 站点' }],
+        },
+        {
+          name: 'php_version',
+          label: 'PHP 版本',
+          type: 'select',
+          value: versions[0]?.id || '',
+          options: versions.length ? versions.map((v) => ({ value: v.id, label: `PHP ${v.version}` })) : [{ value: '', label: '本机未检测到 PHP' }],
+          hint: '仅 PHP 站点需要；选择后会以 php-cgi 沙箱方式运行',
+        },
+      ] : [
+        { name: 'name', label: '站点名称', required: true, value: site.name },
+        {
+          name: 'php_version',
+          label: 'PHP 版本',
+          type: 'select',
+          value: site.php_version || '',
+          options: versions.length ? versions.map((v) => ({ value: v.id, label: `PHP ${v.version}` })) : [{ value: '', label: '本机未检测到 PHP' }],
+          hint: site.type === 'php' ? '切换版本会立即对后续请求生效' : '当前是静态站点，版本不生效',
+        },
+      ],
+    });
+    if (!data) return;
+
+    try {
+      if (isNew) {
+        await api.post('/api/admin/sites', data);
+        toast('站点已创建', 'success');
+      } else {
+        await api.put(`/api/admin/sites/${site.id}`, data);
+        toast('已保存', 'success');
+      }
+      viewSites();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+
+  async function deployForm(site) {
+    const data = await formModal({
+      title: `从 GitHub 部署：${site.name}`,
+      submitText: '开始部署',
+      fields: [
+        {
+          name: 'repo_url',
+          label: '仓库地址',
+          required: true,
+          value: site.repo_url || '',
+          placeholder: 'https://github.com/owner/repo',
+          hint: '仅支持 GitHub 公开仓库（下载 codeload tar.gz）',
+        },
+        { name: 'repo_ref', label: '分支 / 标签', value: site.repo_ref || 'main', placeholder: 'main' },
+        { name: 'sub_dir', label: '子目录（可选）', value: site.sub_dir || '', placeholder: '例如：dist', hint: '仓库里要作为站点根目录的目录，留空表示仓库根' },
+      ],
+    });
+    if (!data) return;
+
+    toast('正在下载并部署，请稍候…', 'info', 4000);
+    try {
+      const r = await api.post(`/api/admin/sites/${site.id}/deploy`, data);
+      void r;
+      toast('部署完成', 'success');
+    } catch (err) {
+      toast(err.message, 'error', 6000);
+    }
+    viewSites();
+  }
+
+  async function openDeployHistory(site) {
+    let list = [];
+    try {
+      const data = await api.get(`/api/admin/sites/${site.id}/deploys`);
+      list = data.list || [];
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+
+    const body = el('div');
+    body.innerHTML = list.length === 0
+      ? emptyState('📄', '还没有部署记录', '从 GitHub 部署成功后，这里会保留最近 20 次记录。')
+      : `<div class="table-wrap"><table class="table table--compact">
+          <thead><tr><th>时间</th><th>来源</th><th>版本</th><th>结果</th><th>耗时</th><th>详情</th></tr></thead>
+          <tbody>${list.map((d) => `
+            <tr>
+              <td class="text-xs text-muted">${escapeHtml(d.created_at || '')}</td>
+              <td class="text-xs">${escapeHtml(d.source || '-')}</td>
+              <td class="text-xs">${escapeHtml(d.ref || '-')}</td>
+              <td>${d.status === 'success'
+                ? '<span class="badge badge--success">成功</span>'
+                : `<span class="badge badge--danger">失败</span>`}</td>
+              <td class="text-xs">${d.duration_ms ? `${d.duration_ms} ms` : '-'}</td>
+              <td class="text-xs text-muted" style="max-width:260px">${escapeHtml(String(d.detail || '').slice(0, 160))}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>`;
+
+    modal({ title: `部署记录：${site.name}`, size: 'lg', body });
   }
 
   /* ============================== 系统设置 ============================== */
